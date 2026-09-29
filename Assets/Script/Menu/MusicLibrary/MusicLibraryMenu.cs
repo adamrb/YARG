@@ -17,6 +17,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Player;
 using YARG.Playlists;
+using YARG.Recommendations;
 using YARG.Scores;
 using YARG.Settings;
 using YARG.Song;
@@ -89,7 +90,8 @@ namespace YARG.Menu.MusicLibrary
         Library,
         PlaylistSelect,
         Playlist,
-        Show
+        Show,
+        Swipe
     }
 
     public partial class MusicLibraryMenu : ListMenu<ViewType, SongView>
@@ -99,6 +101,7 @@ namespace YARG.Menu.MusicLibrary
         private const int BACK_ID = 2;
         private const int RECOMMENDED_SONGS_ID = 3;
         private const int CREATE_NEW_PLAYLIST_ID = 4;
+        private const int SONG_SWIPE_ID = 5;
         private const int MINIMUM_ALBUM_GROUP_SIZE = 3;
 
         public static MusicLibraryMode LibraryMode;
@@ -143,7 +146,7 @@ namespace YARG.Menu.MusicLibrary
         private PopupMenu _popupMenu;
 
         protected override int ExtraListViewPadding => 15;
-        protected override bool CanScroll => !_popupMenu.gameObject.activeSelf;
+        protected override bool CanScroll => !_popupMenu.gameObject.activeSelf && MenuState != MenuState.Swipe;
 
         public bool ShouldDisplaySoloHighScores { get; private set; }
 
@@ -207,6 +210,13 @@ namespace YARG.Menu.MusicLibrary
             // Hack to ensure that crowd samples are stopped no matter what
             GlobalAudioHandler.StopAllSfxChannels();
 
+            // Song Swipe does not survive leaving the library (for example to play a song)
+            if (MenuState == MenuState.Swipe)
+            {
+                MenuState = MenuState.Library;
+                CloseSwipeView();
+            }
+
             // Set navigation scheme
             SetNavigationScheme();
 
@@ -230,6 +240,10 @@ namespace YARG.Menu.MusicLibrary
             }
             else if (_reloadState == MusicLibraryReloadState.Partial)
             {
+                // A partial reload follows a finished song or a profile change, both of which change
+                // what the recommender knows, so rebuild the recommendations before the list
+                SetRecommendedSongs();
+
                 // Note that the order matters here: SelectedPlaylist must be set before calling UpdateSearch,
                 // but SelectedIndex must be set _after_ calling UpdateSearch
                 SelectedPlaylist = _savedPlaylist;
@@ -331,8 +345,8 @@ namespace YARG.Menu.MusicLibrary
         // Public because PopupMenu may need to reset the navigation scheme
         public void SetNavigationScheme(bool reset = false)
         {
-            // Show mode sets its own navigation, don't overwrite
-            if (MenuState == MenuState.Show)
+            // Show and swipe modes set their own navigation, don't overwrite
+            if (MenuState is MenuState.Show or MenuState.Swipe)
             {
                 return;
             }
@@ -483,6 +497,7 @@ namespace YARG.Menu.MusicLibrary
                 MenuState.PlaylistSelect => CreatePlaylistSelectViewList(),
                 MenuState.Playlist       => CreatePlaylistViewList(),
                 MenuState.Show           => CreateShowViewList(),
+                MenuState.Swipe          => CreateSwipeViewList(),
                 _                        => throw new Exception("Unreachable.")
             };
 
@@ -544,7 +559,35 @@ namespace YARG.Menu.MusicLibrary
                 if (SettingsManager.Settings.LibrarySort < SortAttribute.Instrument &&
                     SettingsManager.Settings.ShowRecommendedSongs.Value)
                 {
-                    if (_recommendedSongs != null)
+                    if (_recommendedSongs != null && _recommendedSections != null)
+                    {
+                        foreach (var section in _recommendedSections)
+                        {
+                            list.Add(new ButtonViewType(
+                                Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind.ToString()),
+                                "MusicLibraryIcons[Recommended]",
+                                () =>
+                                {
+                                    bool selectTopOfList = CurrentSelection is SongViewType songView &&
+                                        _recommendedSongs.Contains(songView.SongEntry);
+                                    RefreshAndReselect(selectTopOfList, preserveSelectedIndex: !selectTopOfList);
+                                },
+                                RECOMMENDED_SONGS_ID,
+                                Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind + "Help")
+                            ));
+                            if (_recommendedHeaderIndex == -1)
+                            {
+                                _recommendedHeaderIndex = list.Count - 1;
+                            }
+
+                            foreach (var song in section.Songs)
+                            {
+                                list.Add(new SongViewType(this, song, "recommended"));
+                            }
+                            _primaryHeaderIndex += section.Songs.Length + 1;
+                        }
+                    }
+                    else if (_recommendedSongs != null)
                     {
                         string key = Localize.Key("Menu.MusicLibrary.RecommendedSongs",
                             _recommendedSongs.Length == 1 ? "Singular" : "Plural");
@@ -567,6 +610,17 @@ namespace YARG.Menu.MusicLibrary
                             list.Add(new SongViewType(this, song, "recommended"));
                         }
                         _primaryHeaderIndex += _recommendedSongs.Length + 1;
+                    }
+
+                    if (RecommendationService.GetPrimaryProfile() != null)
+                    {
+                        list.Add(new ButtonViewType(
+                            Localize.Key("Menu.MusicLibrary.SongSwipe.Header"),
+                            "MusicLibraryIcons[Recommended]",
+                            EnterSwipeMode,
+                            SONG_SWIPE_ID,
+                            Localize.Key("Menu.MusicLibrary.SongSwipe.HeaderHelp")));
+                        _primaryHeaderIndex += 1;
                     }
                 }
             }
@@ -971,6 +1025,9 @@ namespace YARG.Menu.MusicLibrary
                     break;
                 case MenuState.Show:
                     LeaveShowMode();
+                    break;
+                case MenuState.Swipe:
+                    LeaveSwipeMode();
                     break;
                 case MenuState.Library:
                     ExitLibrary();

@@ -336,6 +336,39 @@
                 "Plural": "RECOMMENDED SONGS"
             },
             "RecommendedSongsHelp": "Refresh List of Recommended Songs",
+            "Recommendations": {
+                "ForYou": "FOR YOU",
+                "ForYouHelp": "Songs Like the Ones You Keep Coming Back To",
+                "AtYourLevel": "AT YOUR LEVEL",
+                "AtYourLevelHelp": "Songs You Should Play Well Right Now",
+                "NextStepUp": "NEXT STEP UP",
+                "NextStepUpHelp": "A Little Harder, Easiest First",
+                "Challenge": "CHALLENGE",
+                "ChallengeHelp": "Songs That Will Push You"
+            },
+            "SongSwipe": {
+                "Header": "SONG SWIPE",
+                "HeaderHelp": "Strum Up to Like, Down to Pass",
+                "Counts": "{0} LIKED   {1} PASSED",
+                "ReasonArtist": "More from {0}",
+                "ReasonGenre": "You play a lot of {0}",
+                "ReasonNewGenre": "New genre for you: {0}",
+                "ReasonDifferent": "Something different",
+                "NotCharted": "No chart for your instrument",
+                "DifficultyLine": "Difficulty {0}/6, {1}",
+                "Comfortable": "should feel comfortable",
+                "Stretch": "a bit of a stretch",
+                "Challenge": "a real challenge",
+                "Like": "Like",
+                "Pass": "Pass",
+                "PassLike": "Pass / Like",
+                "PlayNow": "Play Now",
+                "Favorite": "Favorite",
+                "Skip": "Skip",
+                "Summary": "Song Swipe: {0} liked, {1} passed. Recommendations updated.",
+                "NeedsProfile": "Song Swipe needs a player profile",
+                "NothingLeft": "No more songs to swipe right now"
+            },
             "PlayableSongs": "PLAYABLE SONGS",
             "RandomSong": "RANDOM SONG",
             "Sort": {
@@ -377,6 +410,7 @@
                 },
                 "Item": {
                     "RandomSong": "Random Song",
+                    "SongSwipe": "Song Swipe",
                     "BackToTop": "Back to Top",
                     "ScanSongs": "Scan Songs",
                     "SortBy": "Sort By...",

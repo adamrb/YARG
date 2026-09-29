@@ -15,6 +15,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Player;
 using YARG.Playlists;
+using YARG.Recommendations;
 using YARG.Settings;
 using YARG.Song;
 
@@ -160,6 +161,16 @@ namespace YARG.Menu.MusicLibrary
                 {
                     _musicLibrary.SelectRandomSong();
                     gameObject.SetActive(false);
+                });
+            }
+
+            if (_musicLibrary.MenuState == MenuState.Library && RecommendationService.GetPrimaryProfile() != null)
+            {
+                CreateItem("SongSwipe", () =>
+                {
+                    // Close first so the popup's navigation scheme is gone before swipe mode swaps schemes
+                    gameObject.SetActive(false);
+                    _musicLibrary.EnterSwipeMode();
                 });
             }
 

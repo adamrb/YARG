@@ -44,5 +44,35 @@ namespace Editor
             // Build the player
             BuildPipeline.BuildPlayer(buildSettings);
         }
+
+        /// <summary>
+        /// Headless entry point for <c>-executeMethod Editor.MakeTestBuild.BuildLinuxTestFromCommandLine</c>.
+        /// Output path can be set with <c>-buildOutput &lt;path&gt;</c>.
+        /// </summary>
+        public static void BuildLinuxTestFromCommandLine()
+        {
+            var args = Environment.GetCommandLineArgs();
+            int outputIndex = Array.IndexOf(args, "-buildOutput");
+            string output = outputIndex >= 0 && outputIndex + 1 < args.Length
+                ? args[outputIndex + 1]
+                : "Builds/Linux/YARG.x86_64";
+
+            var options = new BuildPlayerOptions
+            {
+                scenes = EditorBuildSettings.scenes
+                    .Where(scene => scene.enabled)
+                    .Select(scene => scene.path)
+                    .ToArray(),
+                locationPathName = output,
+                target = BuildTarget.StandaloneLinux64,
+                extraScriptingDefines = new[] { YARG_TEST_BUILD },
+            };
+
+            var report = BuildPipeline.BuildPlayer(options);
+            if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            {
+                EditorApplication.Exit(1);
+            }
+        }
     }
 }

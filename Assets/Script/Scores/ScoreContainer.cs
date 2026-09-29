@@ -491,6 +491,19 @@ namespace YARG.Scores
             PlayerHighPercentages.Clear();
         }
 
+        public static List<PlayerHistoryRecord> GetPlayerHistory(Guid playerId)
+        {
+            try
+            {
+                return _db.QueryPlayerHistory(playerId);
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to load player history from database.");
+                return new List<PlayerHistoryRecord>();
+            }
+        }
+
         public static List<SongEntry> GetMostPlayedSongs(int maxCount)
         {
             try

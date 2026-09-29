@@ -24,6 +24,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Menu.ScoreScreen;
 using YARG.Playback;
+using YARG.Recommendations;
 using YARG.Player;
 using YARG.Replays;
 using YARG.Scores;
@@ -823,8 +824,41 @@ namespace YARG.Gameplay
 
         public void ForceQuitSong()
         {
+            RecordQuitForRecommendations();
+
             GlobalVariables.State = PersistentState.Default;
             GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
+        }
+
+        /// <summary>
+        /// Leaving a song early is a signal the recommender can use, but the score database only records
+        /// finished songs, so quits are stored separately.
+        /// </summary>
+        private void RecordQuitForRecommendations()
+        {
+            if (Song == null || _players == null || IsPractice || SongLength <= 0 ||
+                GlobalVariables.State.PlayingWithReplay)
+            {
+                return;
+            }
+
+            float progress = Mathf.Clamp01((float) (SongTime / SongLength));
+            if (progress >= 0.97f)
+            {
+                return;
+            }
+
+            foreach (var player in _players)
+            {
+                var profile = player.Player.Profile;
+                if (profile.IsBot || player.Player.IsReplay)
+                {
+                    continue;
+                }
+
+                RecommendationStore.RecordQuit(profile.Id, Song.Hash.HashBytes, profile.CurrentInstrument,
+                    profile.CurrentDifficulty, progress);
+            }
         }
 
         public void SetVenueCameraManager(CameraManager cameraManager)
