@@ -75,9 +75,12 @@ namespace YARG.Recommendations
                     Key = key,
                     Features = GetFeatures(song),
                     ChartDifficulty = GetChartDifficulty(song, instrument, difficulty, 1f),
+                    Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
                 };
                 songs[key] = song;
             }
+
+            SongNormalizer.AssignCanonical(library.Values.Select(f => (f, songs[f.Key].Name.SearchStr)));
 
             var plays = new List<PlayFact>();
             foreach (var record in ScoreContainer.GetPlayerHistory(profile.Id))
@@ -141,40 +144,10 @@ namespace YARG.Recommendations
 
         private static SongFeature[] GetFeatures(SongEntry song)
         {
-            var features = new List<SongFeature>(7);
-
-            void Add(FeatureType type, string value)
-            {
-                if (!string.IsNullOrWhiteSpace(value))
-                {
-                    features.Add(new SongFeature(type, value.Trim().ToLowerInvariant()));
-                }
-            }
-
-            Add(FeatureType.Artist, song.Artist.SortStr);
-            Add(FeatureType.Genre, song.Genre.SortStr);
-            Add(FeatureType.Subgenre, song.Subgenre.SortStr);
-            Add(FeatureType.Charter, song.Charter.SortStr);
-            Add(FeatureType.Source, song.Source.SortStr);
-
-            if (song.YearAsNumber > 0 && song.YearAsNumber != int.MaxValue)
-            {
-                Add(FeatureType.Decade, (song.YearAsNumber / 10 * 10).ToString());
-            }
-
-            if (song.SongLengthSeconds > 0)
-            {
-                string length = song.SongLengthSeconds switch
-                {
-                    < 150 => "short",
-                    < 270 => "medium",
-                    < 420 => "long",
-                    _     => "epic",
-                };
-                Add(FeatureType.Length, length);
-            }
-
-            return features.ToArray();
+            int year = song.YearAsNumber != int.MaxValue ? song.YearAsNumber : 0;
+            // SearchStr has rich-text tags and diacritics removed, so markup never turns into features
+            return SongNormalizer.Features(song.Artist.SearchStr, song.Genre.SearchStr, song.Subgenre.SearchStr,
+                song.Charter.SearchStr, song.Source.SearchStr, year, song.SongLengthSeconds);
         }
 
         private static float? GetChartDifficulty(SongEntry song, Instrument instrument, Difficulty difficulty,
@@ -292,8 +265,8 @@ namespace YARG.Recommendations
                 _skill ??= SkillModel.Fit(_snapshot.Plays, (int) Profile.CurrentDifficulty, DateTime.Now);
 
                 const string KEY = "Menu.MusicLibrary.SongSwipe";
-                var artist = new SongFeature(FeatureType.Artist, song.Artist.SortStr.Trim().ToLowerInvariant());
-                var genre = new SongFeature(FeatureType.Genre, song.Genre.SortStr.Trim().ToLowerInvariant());
+                var artist = new SongFeature(FeatureType.Artist, SongNormalizer.Artist(song.Artist.SearchStr));
+                var genre = new SongFeature(FeatureType.Genre, SongNormalizer.Collapse(song.Genre.SearchStr));
 
                 string reason;
                 if (_taste.Affinity(artist) > 0.3f)
@@ -341,35 +314,84 @@ namespace YARG.Recommendations
                 return keys.Select(k => _snapshot.Songs[k]).ToList();
             }
 
-            public void Swipe(SongEntry song, bool liked)
+            // Undo tokens are local to the session, so undo works even if the database write failed
+            private readonly Dictionary<int, (int RecordId, FeedbackFact Fact)> _sessionFeedback = new();
+            private int _nextToken;
+
+            /// <summary>
+            /// Records a like or pass and returns a token that <see cref="UndoSwipe"/> can take back.
+            /// </summary>
+            public int Swipe(SongEntry song, bool liked)
             {
-                RecommendationStore.RecordFeedback(Profile.Id, song.Hash.HashBytes, liked);
-                _snapshot.Feedback.Add(new FeedbackFact
+                int recordId = RecommendationStore.RecordFeedback(Profile.Id, song.Hash.HashBytes, liked);
+                var fact = new FeedbackFact
                 {
                     Key = song.Hash.ToString(),
                     Liked = liked,
                     Date = DateTime.Now,
-                });
+                };
+                _snapshot.Feedback.Add(fact);
+                int token = _nextToken++;
+                _sessionFeedback[token] = (recordId, fact);
 
                 if (liked) LikedCount++;
                 else PassedCount++;
+
+                Rebuild();
+                return token;
+            }
+
+            public void UndoSwipe(int token)
+            {
+                if (!_sessionFeedback.TryGetValue(token, out var entry))
+                {
+                    return;
+                }
+
+                RecommendationStore.DeleteFeedback(entry.RecordId);
+                _snapshot.Feedback.Remove(entry.Fact);
+                _sessionFeedback.Remove(token);
+
+                if (entry.Fact.Liked) LikedCount--;
+                else PassedCount--;
 
                 Rebuild();
             }
 
             /// <summary>
             /// Call after the song was added to favorites, so the rest of the session learns from it.
+            /// Returns true if the song was not already a favorite in the model.
             /// </summary>
-            public void Favorite(SongEntry song)
+            public bool Favorite(SongEntry song)
             {
                 string key = song.Hash.ToString();
-                if (!_snapshot.Favorites.Contains(key))
+                if (_snapshot.Favorites.Contains(key))
                 {
-                    _snapshot.Favorites.Add(key);
+                    return false;
                 }
 
-                LikedCount++;
+                _snapshot.Favorites.Add(key);
                 Rebuild();
+                return true;
+            }
+
+            public void UndoFavorite(SongEntry song)
+            {
+                _snapshot.Favorites.Remove(song.Hash.ToString());
+                Rebuild();
+            }
+
+            /// <summary>
+            /// Songs this profile has already swiped, most likely mistakes first (the ones that disagree
+            /// most with everything else the profile has done), with the current answer for each.
+            /// </summary>
+            public List<(SongEntry Song, bool Liked)> RatedSongs()
+            {
+                return Recommender.RankLikelyMistakes(_snapshot.Library, _snapshot.Plays, _snapshot.Feedback,
+                        _snapshot.Quits, _snapshot.Favorites, DateTime.Now)
+                    .Where(r => _snapshot.Songs.ContainsKey(r.Key))
+                    .Select(r => (_snapshot.Songs[r.Key], r.Liked))
+                    .ToList();
             }
         }
 

@@ -89,23 +89,43 @@ namespace YARG.Recommendations
             _db = null;
         }
 
-        public static void RecordFeedback(Guid profileId, byte[] songChecksum, bool liked)
+        /// <summary>
+        /// Saves a like or pass and returns its record ID (for undo), or -1 if it could not be saved.
+        /// </summary>
+        public static int RecordFeedback(Guid profileId, byte[] songChecksum, bool liked)
         {
-            if (_db == null) return;
+            if (_db == null) return -1;
 
             try
             {
-                _db.Insert(new SongFeedbackRecord
+                var record = new SongFeedbackRecord
                 {
                     ProfileId = profileId,
                     SongChecksum = songChecksum,
                     Liked = liked,
                     Date = DateTime.Now,
-                });
+                };
+                _db.Insert(record);
+                return record.Id;
             }
             catch (Exception e)
             {
                 YargLogger.LogException(e, "Failed to save song feedback.");
+                return -1;
+            }
+        }
+
+        public static void DeleteFeedback(int id)
+        {
+            if (_db == null || id < 0) return;
+
+            try
+            {
+                _db.Delete<SongFeedbackRecord>(id);
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to undo song feedback.");
             }
         }
 

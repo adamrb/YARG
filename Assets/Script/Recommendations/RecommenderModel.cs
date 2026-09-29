@@ -14,6 +14,11 @@ namespace YARG.Recommendations
         Charter,
         Source,
         Length,
+
+        /// <summary>
+        /// Each word of the genre and subgenre, so "Pop Punk" and "Punk Rock" share "punk".
+        /// </summary>
+        GenreWord,
     }
 
     public readonly struct SongFeature : IEquatable<SongFeature>
@@ -46,6 +51,204 @@ namespace YARG.Recommendations
         /// cannot be played that way. See <see cref="SkillModel.ChartDifficulty"/>.
         /// </summary>
         public float? ChartDifficulty;
+
+        /// <summary>
+        /// The same song across charts and versions (for example a Harmonix and a Neversoft chart, or a
+        /// prototype), so only one version is ever recommended. Defaults to <see cref="Key"/>.
+        /// </summary>
+        public string Identity;
+
+        /// <summary>
+        /// False for the other versions of a song that has several; only the canonical one is offered.
+        /// </summary>
+        public bool Canonical = true;
+
+        public string Id => Identity ?? Key;
+
+        public string Artist => First(FeatureType.Artist);
+        public string Genre => First(FeatureType.Genre);
+
+        private string First(FeatureType type)
+        {
+            foreach (var feature in Features)
+            {
+                if (feature.Type == type) return feature.Value;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Turns song metadata into model features, cleaning up the inconsistencies of a big custom
+    /// library: "Pop/Rock", "Pop Rock" and "pop-rock" are one genre, "Artist (Charter Name)" is the
+    /// artist, and "Song (2005 Prototype)" is the same song as "Song".
+    /// </summary>
+    public static class SongNormalizer
+    {
+        private static readonly HashSet<string> GenreStopWords = new() { "and", "n", "the", "other", "of" };
+
+        // Version tags that mark a non-definitive chart of a song
+        private static readonly string[] AlternateVersionWords =
+            { "demo", "prototype", "beta", "live", "remix", "rehearsal", "alt", "alternate", "cover", "karaoke" };
+
+        // Words that make a bracketed part of a title a version note rather than part of the name
+        private static readonly HashSet<string> VersionNoteWords = new(AlternateVersionWords.Concat(new[]
+        {
+            "version", "remaster", "remastered", "mix", "edit", "radio", "single", "album", "feat", "ft",
+            "featuring", "take", "retail", "early", "original", "rerecord", "rerecorded", "mono", "stereo",
+            "acoustic", "unplugged", "instrumental", "extended", "short", "full", "jan", "feb", "mar", "apr",
+            "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+        }));
+
+        public static string Collapse(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            var chars = text.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray();
+            return string.Join(" ", new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        public static string StripBrackets(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            var result = new System.Text.StringBuilder();
+            int depth = 0;
+            foreach (char c in text)
+            {
+                if (c is '(' or '[' or '{') { depth++; continue; }
+                if (c is ')' or ']' or '}') { depth = Math.Max(0, depth - 1); continue; }
+                if (depth == 0) result.Append(c);
+            }
+
+            return result.ToString();
+        }
+
+        public static string Artist(string artist)
+        {
+            string name = Collapse(StripBrackets(artist));
+            return name.StartsWith("the ") ? name.Substring(4) : name;
+        }
+
+        /// <summary>
+        /// The song's name without version notes: "(Live)", "(2005 Prototype)" and "[Remastered]" are
+        /// dropped, while "(Slight Return)" or "(Parts I-V)" stay, since they are part of the name.
+        /// </summary>
+        public static string Title(string title)
+        {
+            if (string.IsNullOrEmpty(title)) return string.Empty;
+            var result = new System.Text.StringBuilder();
+            var group = new System.Text.StringBuilder();
+            int depth = 0;
+            foreach (char c in title)
+            {
+                if (c is '(' or '[' or '{')
+                {
+                    if (depth == 0) group.Clear();
+                    depth++;
+                    continue;
+                }
+
+                if (c is ')' or ']' or '}')
+                {
+                    if (depth == 0) continue;
+                    depth--;
+                    if (depth == 0 && !IsVersionNote(group.ToString()))
+                    {
+                        result.Append(' ').Append(group).Append(' ');
+                    }
+
+                    continue;
+                }
+
+                (depth == 0 ? result : group).Append(c);
+            }
+
+            return Collapse(result.ToString());
+        }
+
+        private static bool IsVersionNote(string text)
+        {
+            return Collapse(text).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Any(w => VersionNoteWords.Contains(w) || (w.Length == 4 && w.All(char.IsDigit)));
+        }
+
+        public static string Identity(string artist, string title) => Artist(artist) + "|" + Title(title);
+
+        /// <summary>
+        /// True when the title marks this chart as a demo, prototype, live take or similar.
+        /// </summary>
+        public static bool IsAlternateVersion(string title)
+        {
+            var words = Collapse(title).Split(' ');
+            var plain = Collapse(StripBrackets(title)).Split(' ');
+            return words.Any(w => AlternateVersionWords.Contains(w) && !plain.Contains(w));
+        }
+
+        public static SongFeature[] Features(string artist, string genre, string subgenre, string charter,
+            string source, int year, double lengthSeconds)
+        {
+            var features = new List<SongFeature>(12);
+
+            void Add(FeatureType type, string value)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    features.Add(new SongFeature(type, value));
+                }
+            }
+
+            Add(FeatureType.Artist, Artist(artist));
+            string genreText = Collapse(genre);
+            string subgenreText = Collapse(subgenre);
+            Add(FeatureType.Genre, genreText);
+            Add(FeatureType.Subgenre, subgenreText);
+            foreach (string word in (genreText + " " + subgenreText).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Where(w => !GenreStopWords.Contains(w)).Distinct())
+            {
+                Add(FeatureType.GenreWord, word);
+            }
+
+            Add(FeatureType.Charter, Collapse(charter));
+            Add(FeatureType.Source, Collapse(source));
+
+            if (year > 0 && year < 3000)
+            {
+                Add(FeatureType.Decade, (year / 10 * 10).ToString());
+            }
+
+            if (lengthSeconds > 0)
+            {
+                Add(FeatureType.Length, lengthSeconds switch
+                {
+                    < 150 => "short",
+                    < 270 => "medium",
+                    < 420 => "long",
+                    _     => "epic",
+                });
+            }
+
+            return features.ToArray();
+        }
+
+        /// <summary>
+        /// Groups a library by song identity and marks one version of each as canonical: a playable
+        /// chart first, then one that is not a demo or prototype, then the shortest title.
+        /// </summary>
+        public static void AssignCanonical(IEnumerable<(SongFacts Facts, string Title)> songs)
+        {
+            foreach (var group in songs.GroupBy(s => s.Facts.Id))
+            {
+                var best = group
+                    .OrderBy(s => s.Facts.ChartDifficulty.HasValue ? 0 : 1)
+                    .ThenBy(s => IsAlternateVersion(s.Title) ? 1 : 0)
+                    .ThenBy(s => s.Title.Length)
+                    .First();
+                foreach (var song in group)
+                {
+                    song.Facts.Canonical = ReferenceEquals(song.Facts, best.Facts);
+                }
+            }
+        }
     }
 
     public sealed class PlayFact
@@ -101,11 +304,12 @@ namespace YARG.Recommendations
         public static readonly IReadOnlyDictionary<FeatureType, float> FeatureWeights =
             new Dictionary<FeatureType, float>
             {
-                { FeatureType.Artist, 1.0f },
-                { FeatureType.Genre, 0.8f },
-                { FeatureType.Subgenre, 0.6f },
+                { FeatureType.Artist, 0.6f },
+                { FeatureType.Genre, 0.5f },
+                { FeatureType.Subgenre, 0.4f },
+                { FeatureType.GenreWord, 0.7f },
                 { FeatureType.Decade, 0.35f },
-                { FeatureType.Charter, 0.2f },
+                { FeatureType.Charter, 0.15f },
                 { FeatureType.Source, 0.15f },
                 { FeatureType.Length, 0.1f },
             };
@@ -129,6 +333,7 @@ namespace YARG.Recommendations
         private readonly Dictionary<SongFeature, (float Sum, int Count)> _features = new();
         private readonly Dictionary<string, float> _evidence = new();
         private float _baseline;
+        private float _evidenceTotal;
 
         public IReadOnlyDictionary<string, float> Evidence => _evidence;
 
@@ -207,14 +412,16 @@ namespace YARG.Recommendations
             // once and never revisited ends up below the genres the profile keeps returning to, while
             // a profile that only ever plays one genre still rates that genre above untried ones
             var known = model._evidence.Where(e => library.ContainsKey(e.Key)).ToList();
-            model._baseline = known.Count > 0 ? BASELINE_SHARE * known.Average(e => e.Value) : 0f;
+            model._evidenceTotal = known.Sum(e => e.Value);
+            model._baseline = known.Count > 0 ? BASELINE_SHARE * model._evidenceTotal / known.Count : 0f;
 
             foreach (var (key, evidence) in known)
             {
                 foreach (var feature in library[key].Features)
                 {
                     model._features.TryGetValue(feature, out var entry);
-                    model._features[feature] = (entry.Sum + evidence - model._baseline, entry.Count + 1);
+                    // Raw sums; the baseline is applied when reading, so it can be recomputed for leave-one-out
+                    model._features[feature] = (entry.Sum + evidence, entry.Count + 1);
                 }
             }
 
@@ -235,7 +442,7 @@ namespace YARG.Recommendations
                 return 0f;
             }
 
-            return entry.Sum / (entry.Count + SHRINKAGE);
+            return (entry.Sum - entry.Count * _baseline) / (entry.Count + SHRINKAGE);
         }
 
         public int ObservationCount(SongFeature feature)
@@ -249,6 +456,27 @@ namespace YARG.Recommendations
         public float Score(SongFacts song)
         {
             return WeightedAverageByType(song.Features, Affinity);
+        }
+
+        /// <summary>
+        /// The score this song would get if its own evidence were not part of the model (leave-one-out).
+        /// </summary>
+        public float ScoreExcluding(SongFacts song)
+        {
+            if (!_evidence.TryGetValue(song.Key, out float own))
+            {
+                return Score(song);
+            }
+
+            // Recompute the baseline as if this song had no evidence, then take it out of each feature
+            int others = ObservedSongCount - 1;
+            float baseline = others > 0 ? BASELINE_SHARE * (_evidenceTotal - own) / others : 0f;
+            return WeightedAverageByType(song.Features, feature =>
+            {
+                if (!_features.TryGetValue(feature, out var entry)) return 0f;
+                int count = entry.Count - 1;
+                return (entry.Sum - own - count * baseline) / (count + SHRINKAGE);
+            });
         }
 
         /// <summary>
@@ -445,6 +673,9 @@ namespace YARG.Recommendations
     public sealed class RecommendedSong
     {
         public string Key;
+        public string Identity;
+        public string Artist;
+        public string Genre;
         public RecommendationKind Kind;
         public float Taste;
         public float PredictedAccuracy;
@@ -468,13 +699,18 @@ namespace YARG.Recommendations
         public static readonly IReadOnlyDictionary<RecommendationKind, int> SectionSizes =
             new Dictionary<RecommendationKind, int>
             {
-                { RecommendationKind.ForYou, 4 },
-                { RecommendationKind.AtYourLevel, 3 },
-                { RecommendationKind.NextStepUp, 3 },
-                { RecommendationKind.Challenge, 2 },
+                { RecommendationKind.ForYou, 8 },
+                { RecommendationKind.AtYourLevel, 6 },
+                { RecommendationKind.NextStepUp, 6 },
+                { RecommendationKind.Challenge, 4 },
             };
 
         private const double RECENTLY_PLAYED_DAYS = 2;
+        private const int MAX_PER_ARTIST = 1;
+        private const int MAX_GENRE_PER_ROW = 3;
+        private const int MAX_GENRE_TOTAL = 6;
+        private const double SWIPE_EXPLORATION = 0.5;
+        private const double SWIPE_NOISE = 0.25;
         private const double FRESHNESS_NOISE = 0.05;
         private const double DISCOVERY_NOISE = 0.5;
 
@@ -491,14 +727,18 @@ namespace YARG.Recommendations
             var taste = TasteModel.Build(library, plays, feedback, quits, favorites, now);
             var skill = SkillModel.Fit(plays, currentDifficulty, now);
 
+            string IdOf(string key) => library.TryGetValue(key, out var facts) ? facts.Id : key;
+
+            // Everything below works on song identities, so a play or pass on one version of a song
+            // applies to all of its versions
             var recentlyPlayed = new HashSet<string>(plays
                 .Where(p => (now - p.Date).TotalDays < RECENTLY_PLAYED_DAYS)
-                .Select(p => p.Key));
+                .Select(p => IdOf(p.Key)));
             // A pass hides a song only until it is actually played, matching how the taste model
             // stops counting swipes once there is real play data
-            var playedKeys = new HashSet<string>(plays.Select(p => p.Key));
+            var playedKeys = new HashSet<string>(plays.Select(p => IdOf(p.Key)));
             var passed = new HashSet<string>(feedback
-                .GroupBy(f => f.Key)
+                .GroupBy(f => IdOf(f.Key))
                 .Where(g => !g.OrderBy(f => f.Date).Last().Liked && !playedKeys.Contains(g.Key))
                 .Select(g => g.Key));
 
@@ -507,7 +747,8 @@ namespace YARG.Recommendations
             // slot without crowding out what the profile is known to enjoy.
             var discovery = new Dictionary<string, float>();
             var candidates = library.Values
-                .Where(s => s.ChartDifficulty.HasValue && !recentlyPlayed.Contains(s.Key) && !passed.Contains(s.Key))
+                .Where(s => s.Canonical && s.ChartDifficulty.HasValue && !recentlyPlayed.Contains(s.Id) &&
+                    !passed.Contains(s.Id))
                 .Select(s =>
                 {
                     float tasteScore = taste.Score(s) + (float) (NextGaussian(random) * FRESHNESS_NOISE);
@@ -516,6 +757,9 @@ namespace YARG.Recommendations
                     return new RecommendedSong
                     {
                         Key = s.Key,
+                        Identity = s.Id,
+                        Artist = s.Artist,
+                        Genre = s.Genre,
                         Taste = tasteScore,
                         PredictedAccuracy = skill.PredictSong(s),
                     };
@@ -524,14 +768,49 @@ namespace YARG.Recommendations
 
             var result = new RecommendationResult { Taste = taste, Skill = skill };
             var used = new HashSet<string>();
+            var artistCounts = new Dictionary<string, int>();
+            var genreCounts = new Dictionary<string, int>();
 
+            // Variety rules: one version of a song; in a row, one song per artist and at most
+            // MAX_GENRE_PER_ROW of one genre; across all rows, at most MAX_PER_ARTIST songs by one
+            // artist and MAX_GENRE_TOTAL of one genre
             void Take(RecommendationKind kind, IEnumerable<RecommendedSong> ordered, int? count = null)
             {
-                foreach (var song in ordered.Where(s => !used.Contains(s.Key)).Take(count ?? SectionSizes[kind]))
+                int wanted = count ?? SectionSizes[kind];
+                var row = result.Songs.Where(s => s.Kind == kind).ToList();
+                var rowArtists = new HashSet<string>(row.Where(s => s.Artist != null).Select(s => s.Artist));
+                var rowGenres = row.Where(s => s.Genre != null).GroupBy(s => s.Genre)
+                    .ToDictionary(g => g.Key, g => g.Count());
+                foreach (var song in ordered)
                 {
+                    if (wanted <= 0) break;
+                    if (used.Contains(song.Identity)) continue;
+                    if (song.Artist != null)
+                    {
+                        artistCounts.TryGetValue(song.Artist, out int total);
+                        if (rowArtists.Contains(song.Artist) || total >= MAX_PER_ARTIST) continue;
+                    }
+
+                    if (song.Genre != null)
+                    {
+                        rowGenres.TryGetValue(song.Genre, out int inRow);
+                        genreCounts.TryGetValue(song.Genre, out int total);
+                        if (inRow >= MAX_GENRE_PER_ROW || total >= MAX_GENRE_TOTAL) continue;
+                        rowGenres[song.Genre] = inRow + 1;
+                        genreCounts[song.Genre] = total + 1;
+                    }
+
+                    if (song.Artist != null)
+                    {
+                        rowArtists.Add(song.Artist);
+                        artistCounts.TryGetValue(song.Artist, out int total);
+                        artistCounts[song.Artist] = total + 1;
+                    }
+
                     song.Kind = kind;
-                    used.Add(song.Key);
+                    used.Add(song.Identity);
                     result.Songs.Add(song);
+                    wanted--;
                 }
             }
 
@@ -541,8 +820,8 @@ namespace YARG.Recommendations
                 .OrderByDescending(s => s.Taste)
                 .ToList();
             int forYouSize = SectionSizes[RecommendationKind.ForYou];
-            Take(RecommendationKind.ForYou, playableForYou.Where(s => playedKeys.Contains(s.Key)), 1);
-            Take(RecommendationKind.ForYou, playableForYou.Where(s => !playedKeys.Contains(s.Key)), forYouSize - 2);
+            Take(RecommendationKind.ForYou, playableForYou.Where(s => playedKeys.Contains(s.Identity)), 1);
+            Take(RecommendationKind.ForYou, playableForYou.Where(s => !playedKeys.Contains(s.Identity)), forYouSize - 2);
             Take(RecommendationKind.ForYou, playableForYou.OrderByDescending(s => discovery[s.Key]), 1);
             Take(RecommendationKind.ForYou, playableForYou,
                 forYouSize - result.Songs.Count(s => s.Kind == RecommendationKind.ForYou));
@@ -551,14 +830,16 @@ namespace YARG.Recommendations
                 .Where(s => s.PredictedAccuracy >= AT_LEVEL)
                 .OrderByDescending(s => s.Taste));
 
-            // The ladder: among well-liked songs just above the comfort zone that have not been
-            // mastered yet, offer the easiest ones first
+            // The ladder: the best-liked songs just above the comfort zone that have not been
+            // mastered yet, shown easiest first
             Take(RecommendationKind.NextStepUp, candidates
                 .Where(s => s.PredictedAccuracy >= STRETCH && s.PredictedAccuracy < AT_LEVEL &&
                     (skill.BestAccuracy(s.Key) ?? 0f) < AT_LEVEL)
-                .OrderByDescending(s => s.Taste)
-                .Take(SectionSizes[RecommendationKind.NextStepUp] * 3)
-                .OrderByDescending(s => s.PredictedAccuracy));
+                .OrderByDescending(s => s.Taste));
+            var ladder = result.Songs.Where(s => s.Kind == RecommendationKind.NextStepUp)
+                .OrderByDescending(s => s.PredictedAccuracy).ToList();
+            result.Songs.RemoveAll(s => s.Kind == RecommendationKind.NextStepUp);
+            result.Songs.AddRange(ladder);
 
             Take(RecommendationKind.Challenge, candidates
                 .Where(s => s.PredictedAccuracy >= CHALLENGE && s.PredictedAccuracy < STRETCH)
@@ -578,14 +859,17 @@ namespace YARG.Recommendations
             int count,
             Random random)
         {
+            // Anything already seen, rated or played counts for every version of the song
+            var seen = new HashSet<string>(exclude.Concat(taste.Evidence.Keys)
+                .Select(k => library.TryGetValue(k, out var facts) ? facts.Id : k));
             var pool = library.Values
-                .Where(s => s.ChartDifficulty.HasValue && !exclude.Contains(s.Key) && !taste.Evidence.ContainsKey(s.Key))
+                .Where(s => s.Canonical && s.ChartDifficulty.HasValue && !seen.Contains(s.Id))
                 .ToList();
             if (pool.Count == 0)
             {
                 // Nothing playable on the current instrument, fall back to the whole library
                 pool = library.Values
-                    .Where(s => !exclude.Contains(s.Key) && !taste.Evidence.ContainsKey(s.Key))
+                    .Where(s => s.Canonical && !seen.Contains(s.Id))
                     .ToList();
             }
 
@@ -596,6 +880,7 @@ namespace YARG.Recommendations
             }
 
             var picked = new List<string>();
+            var pickedArtists = new HashSet<string>();
             var extra = new Dictionary<SongFeature, int>();
             var available = new HashSet<SongFacts>(pool);
             while (picked.Count < count && available.Count > 0)
@@ -604,8 +889,16 @@ namespace YARG.Recommendations
                 double bestScore = double.MinValue;
                 foreach (var song in available)
                 {
-                    double score = taste.Uncertainty(song, extra) + 0.4 * taste.Score(song) +
-                        0.3 * NextGumbel(random);
+                    // Never two songs by the same artist in one batch
+                    if (song.Artist != null && pickedArtists.Contains(song.Artist))
+                    {
+                        continue;
+                    }
+
+                    // Mostly songs the profile will probably enjoy, with a push toward unexplored
+                    // corners of the library so each batch still teaches the model something
+                    double score = taste.Score(song) + SWIPE_EXPLORATION * taste.Uncertainty(song, extra) +
+                        SWIPE_NOISE * NextGumbel(random);
                     if (score > bestScore)
                     {
                         bestScore = score;
@@ -613,8 +906,18 @@ namespace YARG.Recommendations
                     }
                 }
 
+                if (best == null)
+                {
+                    break;
+                }
+
                 available.Remove(best);
-                picked.Add(best!.Key);
+                picked.Add(best.Key);
+                if (best.Artist != null)
+                {
+                    pickedArtists.Add(best.Artist);
+                }
+
                 foreach (var feature in best.Features)
                 {
                     extra.TryGetValue(feature, out int n);
@@ -623,6 +926,37 @@ namespace YARG.Recommendations
             }
 
             return picked;
+        }
+
+        /// <summary>
+        /// Orders a profile's swipes by how much each one disagrees with everything else the profile has
+        /// done, so accidental likes and passes can be reviewed first. Each swipe is judged by a taste
+        /// model built without it.
+        /// </summary>
+        public static List<(string Key, bool Liked, float Surprise)> RankLikelyMistakes(
+            IReadOnlyDictionary<string, SongFacts> library,
+            IReadOnlyList<PlayFact> plays,
+            IReadOnlyList<FeedbackFact> feedback,
+            IReadOnlyList<QuitFact> quits,
+            IReadOnlyCollection<string> favorites,
+            DateTime now)
+        {
+            var latest = feedback
+                .Where(f => f.Key != null && library.ContainsKey(f.Key))
+                .GroupBy(f => f.Key)
+                .Select(g => g.OrderBy(f => f.Date).Last())
+                .ToList();
+
+            // One model for everything, then each swipe is scored with its own song's evidence taken out
+            var taste = TasteModel.Build(library, plays, feedback, quits, favorites, now);
+            var result = new List<(string, bool, float)>();
+            foreach (var swipe in latest)
+            {
+                float score = taste.ScoreExcluding(library[swipe.Key]);
+                result.Add((swipe.Key, swipe.Liked, swipe.Liked ? -score : score));
+            }
+
+            return result.OrderByDescending(r => r.Item3).ToList();
         }
 
         private static double NextGaussian(Random random)

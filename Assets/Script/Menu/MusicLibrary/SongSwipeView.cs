@@ -58,6 +58,12 @@ namespace YARG.Menu.MusicLibrary
         private Sequence _animation;
 
         public event Action<SwipeDirection> ButtonClicked;
+        public event Action UndoClicked;
+        public event Action ReviewClicked;
+
+        private TextMeshProUGUI _title;
+        private TextMeshProUGUI _subtitle;
+        private TextMeshProUGUI _reviewButtonText;
 
         public bool HasCard => _front != null;
 
@@ -111,13 +117,13 @@ namespace YARG.Menu.MusicLibrary
             Stretch(backdrop.rectTransform);
             backdrop.rectTransform.offsetMin = new Vector2(0f, HELP_BAR_HEIGHT);
 
-            var title = NewText(root, "Title", Localize.Key("Menu.MusicLibrary.SongSwipe.Header"), 64,
+            _title = NewText(root, "Title", Localize.Key("Menu.MusicLibrary.SongSwipe.Header"), 64,
                 Color.white, FontStyles.Bold, TextAlignmentOptions.TopLeft);
-            Place(title.rectTransform, new Vector2(0f, 1f), new Vector2(80f, -60f), new Vector2(900f, 80f));
+            Place(_title.rectTransform, new Vector2(0f, 1f), new Vector2(80f, -60f), new Vector2(900f, 80f));
 
-            var subtitle = NewText(root, "Subtitle", Localize.Key("Menu.MusicLibrary.SongSwipe.HeaderHelp"), 28,
+            _subtitle = NewText(root, "Subtitle", Localize.Key("Menu.MusicLibrary.SongSwipe.HeaderHelp"), 28,
                 MutedText, FontStyles.Normal, TextAlignmentOptions.TopLeft);
-            Place(subtitle.rectTransform, new Vector2(0f, 1f), new Vector2(82f, -140f), new Vector2(900f, 40f));
+            Place(_subtitle.rectTransform, new Vector2(0f, 1f), new Vector2(82f, -140f), new Vector2(540f, 40f));
 
             _counter = NewText(root, "Counter", string.Empty, 32, Color.white, FontStyles.Bold,
                 TextAlignmentOptions.TopRight);
@@ -131,11 +137,70 @@ namespace YARG.Menu.MusicLibrary
                 MenuData.Colors.NavigationRed, new Vector2(-CARD_WIDTH / 2f - 170f, 60f), SwipeDirection.Pass);
             NewRoundButton(root, "LikeButton", Localize.Key("Menu.MusicLibrary.SongSwipe.Like"),
                 MenuData.Colors.NavigationGreen, new Vector2(CARD_WIDTH / 2f + 170f, 60f), SwipeDirection.Like);
+
+            // Undo sits under Pass (going back), review under the counter
+            NewPillButton(root, "UndoButton", Localize.Key("Menu.MusicLibrary.SongSwipe.Undo"),
+                MenuData.Colors.NavigationOrange, new Vector2(0.5f, 0.5f), new Vector2(-CARD_WIDTH / 2f - 170f, -120f),
+                () => UndoClicked?.Invoke());
+            _reviewButtonText = NewPillButton(root, "ReviewButton", Localize.Key("Menu.MusicLibrary.SongSwipe.Review"),
+                new Color(0.16f, 0.22f, 0.36f, 1f), new Vector2(1f, 1f), new Vector2(-80f, -130f),
+                () => ReviewClicked?.Invoke());
         }
 
-        public void SetCounts(int liked, int passed)
+        public void SetStatus(string text)
         {
-            _counter.text = Localize.KeyFormat("Menu.MusicLibrary.SongSwipe.Counts", liked, passed);
+            _counter.text = text;
+        }
+
+        public void SetMode(string title, string subtitle, string reviewButton)
+        {
+            _title.text = title;
+            _subtitle.text = subtitle;
+            _reviewButtonText.text = reviewButton.ToUpperInvariant();
+        }
+
+        /// <summary>
+        /// Brings a card back in from where it was thrown (for undo). The current front card moves back.
+        /// </summary>
+        public void Restore(CardInfo front, SwipeDirection thrownTo, Action onFrontChanged)
+        {
+            CompleteAnimation();
+            _back?.Destroy();
+            _back = _front;
+
+            var returning = CreateCard(front);
+            var (start, rotation) = ThrowTarget(thrownTo);
+            returning.Root.anchoredPosition = start;
+            returning.Root.localRotation = Quaternion.Euler(0f, 0f, rotation);
+            _front = returning;
+
+            _animation = DOTween.Sequence().SetUpdate(true);
+            _animation.Join(TweenPosition(returning.Root, Vector2.zero).SetEase(Ease.OutQuad));
+            _animation.Join(returning.Root.DOLocalRotate(Vector3.zero, FLY_DURATION));
+            if (_back != null)
+            {
+                var back = _back;
+                _animation.Insert(0f, TweenPosition(back.Root, new Vector2(0f, BACK_OFFSET)));
+                _animation.Insert(0f, back.Root.DOScale(BACK_SCALE, FLY_DURATION));
+                _animation.Insert(0f, TweenAlpha(back.Group, BACK_ALPHA, FLY_DURATION));
+            }
+
+            _animation.OnComplete(() =>
+            {
+                _animation = null;
+                onFrontChanged?.Invoke();
+            });
+        }
+
+        private static (Vector2 Position, float Rotation) ThrowTarget(SwipeDirection direction)
+        {
+            return direction switch
+            {
+                SwipeDirection.Like     => (new Vector2(1500f, -140f), -22f),
+                SwipeDirection.Pass     => (new Vector2(-1500f, -140f), 22f),
+                SwipeDirection.Favorite => (new Vector2(0f, 1400f), 0f),
+                _                       => (new Vector2(0f, -1400f), 0f),
+            };
         }
 
         /// <summary>
@@ -196,12 +261,13 @@ namespace YARG.Menu.MusicLibrary
                 _back.Group.alpha = 0f;
             }
 
-            var (target, rotation, stamp) = direction switch
+            var (target, rotation) = ThrowTarget(direction);
+            var stamp = direction switch
             {
-                SwipeDirection.Like     => (new Vector2(1500f, -140f), -22f, thrown.LikeStamp),
-                SwipeDirection.Pass     => (new Vector2(-1500f, -140f), 22f, thrown.PassStamp),
-                SwipeDirection.Favorite => (new Vector2(0f, 1400f), 0f, thrown.FavoriteStamp),
-                _                       => (new Vector2(0f, -1400f), 0f, null),
+                SwipeDirection.Like     => thrown.LikeStamp,
+                SwipeDirection.Pass     => thrown.PassStamp,
+                SwipeDirection.Favorite => thrown.FavoriteStamp,
+                _                       => null,
             };
 
             _animation = DOTween.Sequence().SetUpdate(true);
@@ -374,6 +440,26 @@ namespace YARG.Menu.MusicLibrary
             var label = NewText(image.rectTransform, "Text", text.ToUpperInvariant(), 28,
                 MenuData.Colors.GetBestTextColor(color), FontStyles.Bold, TextAlignmentOptions.Center);
             Stretch(label.rectTransform);
+        }
+
+        private TextMeshProUGUI NewPillButton(RectTransform parent, string name, string text, Color color,
+            Vector2 anchor, Vector2 position, Action onClick)
+        {
+            var image = NewImage(parent, name, color, 30f);
+            Place(image.rectTransform, anchor, position, new Vector2(260f, 60f));
+            image.raycastTarget = true;
+            var button = image.gameObject.AddComponent<Button>();
+            button.targetGraphic = image;
+            button.onClick.AddListener(() =>
+            {
+                EventSystem.current?.SetSelectedGameObject(null);
+                onClick();
+            });
+
+            var label = NewText(image.rectTransform, "Text", text.ToUpperInvariant(), 24,
+                MenuData.Colors.GetBestTextColor(color), FontStyles.Bold, TextAlignmentOptions.Center);
+            Stretch(label.rectTransform);
+            return label;
         }
 
         private static Color GenreColor(string genre)
