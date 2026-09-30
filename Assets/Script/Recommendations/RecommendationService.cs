@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Threading.Tasks;
 using YARG.Core;
 using YARG.Core.Game;
 using YARG.Core.Logging;
@@ -49,7 +51,7 @@ namespace YARG.Recommendations
         private static readonly Queue<HashSet<string>> _shownBeforeRefresh = new();
         private static HashSet<string> _lastShown = new();
         private static Guid _lastProfile;
-        private static ArtistMap _artistMap;
+        private static readonly Lazy<ArtistMap> _artistMap = new(LoadArtistMap);
 
         /// <summary>
         /// The profile recommendations are made for: the first human player, as the score sorts use.
@@ -138,7 +140,7 @@ namespace YARG.Recommendations
         {
             var instrument = profile.HasValidInstrument ? profile.CurrentInstrument : Instrument.FiveFretGuitar;
             var difficulty = profile.CurrentDifficulty;
-            var map = ArtistMap;
+            var map = _artistMap.Value;
 
             var library = new Dictionary<string, SongFacts>();
             var songs = new Dictionary<string, SongEntry>();
@@ -244,33 +246,41 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// The artist map shipped in StreamingAssets/recommendations/artist-map.tsv, loaded once. A missing
-        /// file just means no map-based signal.
+        /// Starts loading the artist map in the background, so the first recommendations do not wait on it.
         /// </summary>
-        private static ArtistMap ArtistMap
+        public static void PreloadArtistMap() => Task.Run(() => _artistMap.Value);
+
+        /// <summary>
+        /// The artist map shipped in StreamingAssets/recommendations/artist-map.tsv.gz. A missing file just
+        /// means no map-based signal.
+        /// </summary>
+        private static ArtistMap LoadArtistMap()
         {
-            get
+            try
             {
-                if (_artistMap != null)
+                string path = Path.Combine(PathHelper.StreamingAssetsPath, "recommendations", "artist-map.tsv.gz");
+                if (File.Exists(path))
                 {
-                    return _artistMap;
+                    using var reader = new StreamReader(new GZipStream(File.OpenRead(path), CompressionMode.Decompress));
+                    var map = ArtistMap.Parse(ReadLines(reader));
+                    YargLogger.LogFormatInfo("Loaded artist map with {0} artists", map.Count);
+                    return map;
                 }
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to load the artist map.");
+            }
 
-                _artistMap = Core.Song.Recommendations.ArtistMap.Empty;
-                try
-                {
-                    string path = Path.Combine(PathHelper.StreamingAssetsPath, "recommendations", "artist-map.tsv");
-                    if (File.Exists(path))
-                    {
-                        _artistMap = Core.Song.Recommendations.ArtistMap.Parse(File.ReadLines(path));
-                    }
-                }
-                catch (Exception e)
-                {
-                    YargLogger.LogException(e, "Failed to load the artist map.");
-                }
+            return ArtistMap.Empty;
+        }
 
-                return _artistMap;
+        private static IEnumerable<string> ReadLines(TextReader reader)
+        {
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                yield return line;
             }
         }
     }

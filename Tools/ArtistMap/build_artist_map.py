@@ -1,38 +1,26 @@
 #!/usr/bin/env python3
-"""Build YARG's artist map from ListenBrainz listening data (CC0).
+"""Build YARG's artist map from a ListenBrainz statistics dump (CC0).
 
-1. Start from the most-listened artists across all ListenBrainz users (sitewide all-time stats, which
-   list the top 1,000), then keep expanding to the artists most often named as similar to the ones
-   already fetched, until --top artists have their ListenBrainz "similar artists" list (derived from
-   co-listening sessions). Every genre is reached through its neighbors.
-3. Build a graph (edge weight = similarity score, normalized per source artist, symmetrized), keep
-   artists that are linked often enough to place reliably, weight edges by PPMI, and embed with a
-   truncated SVD. Artists that the same people listen to end up close together.
-4. Write "normalized name<TAB>values" lines, normalized the way the game normalizes artist names.
+ListenBrainz publishes full data dumps twice a month at
+https://data.metabrainz.org/pub/musicbrainz/listenbrainz/fullexport/. The statistics dump starts with
+artists_all_time.jsonl: each user's all-time top artists with listen counts. Artists that the same people
+listen to end up close together on the map.
 
-Nothing here depends on any particular player's library. Responses are cached in --cache, so the
-script can be stopped and rerun.
+1. Read every user's artists, keeping those they have played at least --min-listens times.
+2. Keep artists with at least --min-listeners listeners, so each one is placed from enough data.
+3. Weight the user x artist matrix (log listen count, scaled down for artists everyone plays) and take a
+   truncated SVD. Each artist's row, scaled and normalized, is its position.
+4. Write gzipped "normalized name<TAB>values" lines, normalized the way the game normalizes artist names.
 
-    uv run --with numpy --with scipy build_artist_map.py --top 10000 --out artist-map.tsv
+Only the first file of the archive is needed, so it can be streamed without downloading the rest:
+
+    curl -s <dump>/listenbrainz-statistics-dump-<date>.tar.zst | zstd -dc \\
+        | tar -xO --occurrence=1 --wildcards '*/artists_all_time.jsonl' \\
+        | uv run --with numpy --with scipy build_artist_map.py --source listenbrainz-statistics-dump-<date> -
 """
-import argparse, json, math, os, time, unicodedata, urllib.request
-from concurrent.futures import ThreadPoolExecutor
-import threading
+import argparse, gzip, json, math, sys, unicodedata
+from array import array
 
-API = "https://api.listenbrainz.org/1/stats/sitewide/artists"
-SIMILAR = "https://labs.api.listenbrainz.org/similar-artists/json"
-ALGORITHM = "session_based_days_7500_session_300_contribution_5_threshold_10_limit_100_filter_True_skip_30"
-UA = "YARG-artist-map/1.0 (https://github.com/YARC-Official/YARG)"
-
-def get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    for attempt in range(5):
-        try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return json.load(r)
-        except Exception:
-            if attempt == 4: raise
-            time.sleep(3 * (attempt + 1))
 
 def normalize(name):
     """Mirror of SongNormalizer.Artist in the game: accents removed, brackets removed, lower case,
@@ -48,111 +36,64 @@ def normalize(name):
     if len(words) > 1 and words[0] == "the": words = words[1:]
     return " ".join(words)
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--top", type=int, default=10000, help="how many artists to fetch similar lists for")
+    ap.add_argument("input", help="artists_all_time.jsonl, or - for stdin")
+    ap.add_argument("--source", required=True, help="name of the dump, recorded in the output header")
     ap.add_argument("--dims", type=int, default=32)
-    ap.add_argument("--min-links", type=int, default=3, help="drop artists linked fewer times than this")
-    ap.add_argument("--cache", default="artist-map-cache.json")
-    ap.add_argument("--out", default="artist-map.tsv")
+    ap.add_argument("--min-listens", type=int, default=3, help="plays for an artist to count for a user")
+    ap.add_argument("--min-listeners", type=int, default=25, help="users an artist needs to be placed")
+    ap.add_argument("--out", default="artist-map.tsv.gz")
     a = ap.parse_args()
 
-    cache = json.load(open(a.cache)) if os.path.exists(a.cache) else {"top": [], "similar": {}}
-    lock = threading.Lock()
-    def save():
-        json.dump(cache, open(a.cache + ".tmp", "w")); os.replace(a.cache + ".tmp", a.cache)
-
-    if not cache["top"]:
-        offset = 0
-        while True:
-            page = get(f"{API}?count=1000&offset={offset}&range=all_time")["payload"]["artists"]
-            if not page: break
-            offset += len(page)
-            cache["top"] +=[{"id": x["artist_mbid"], "name": x["artist_name"]} for x in page if x.get("artist_mbid")]
-        save(); print(f"sitewide top artists: {len(cache['top'])}", flush=True)
-
-    next_slot = [time.time()]
-    def similar(mbid):
-        with lock:
-            wait = max(0, next_slot[0] - time.time()); next_slot[0] = max(time.time(), next_slot[0]) + 0.25
-        time.sleep(wait)
-        try:
-            data = get(f"{SIMILAR}?artist_mbids={mbid}&algorithm={ALGORITHM}")
-        except Exception:
-            return mbid, None
-        return mbid, [{"id": d["artist_mbid"], "name": d["name"], "score": d["score"]} for d in data][:100]
-
-    # Breadth-first expansion: the next wave is the unfetched artists the fetched ones link to most
-    fetched = [x["id"] for x in cache["top"]]
-    names = {x["id"]: x["name"] for x in cache["top"]}
-    with ThreadPoolExecutor(4) as pool:
-        while True:
-            todo = [m for m in fetched if m not in cache["similar"]]
-            for n, (mbid, result) in enumerate(pool.map(similar, todo), 1):
-                if result is not None:  # failed requests stay uncached so a rerun retries them
-                    cache["similar"][mbid] = result
-                if n % 250 == 0:
-                    with lock: save()
-                    print(f"similar lists: {sum(1 for m in fetched if m in cache['similar'])}/{a.top}", flush=True)
-            save()
-            if len(fetched) >= a.top:
-                break
-            counts = {}
-            for m in fetched:
-                for d in cache["similar"].get(m) or []:
-                    names.setdefault(d["id"], d["name"])
-                    counts[d["id"]] = counts.get(d["id"], 0) + 1
-            known = set(fetched)
-            wave = sorted((m for m in counts if m not in known), key=lambda m: -counts[m])
-            if not wave:
-                break
-            fetched += wave[:min(a.top - len(fetched), max(500, len(fetched)))]
-    top = [{"id": m, "name": names.get(m, "")} for m in fetched[:a.top]]
-
     import numpy as np
-    from scipy.sparse import coo_matrix
+    from scipy.sparse import csr_matrix, diags
     from scipy.sparse.linalg import svds
 
-    names = {x["id"]: x["name"] for x in top}
-    links = {}
-    for src in (x["id"] for x in top):
-        for d in cache["similar"].get(src) or []:
-            names.setdefault(d["id"], d["name"])
-            links[d["id"]] = links.get(d["id"], 0) + 1
-    keep = {x["id"] for x in top if cache["similar"].get(x["id"])} | {m for m, c in links.items() if c >= a.min_links}
-    index = {m: i for i, m in enumerate(sorted(keep))}
-    rows, cols, vals = [], [], []
-    for src in (x["id"] for x in top):
-        lst = cache["similar"].get(src) or []
-        if src not in index or not lst: continue
-        best = max(d["score"] for d in lst) or 1
-        for d in lst:
-            if d["id"] not in index: continue
-            w = d["score"] / best
-            rows += [index[src], index[d["id"]]]; cols += [index[d["id"]], index[src]]; vals += [w, w]
-    n = len(index)
-    A = coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr(); A.sum_duplicates(); A = A.tocoo()
-    degree = np.asarray(A.tocsr().sum(axis=1)).ravel()
-    pmi = np.log(A.data * degree.sum() / (degree[A.row] * degree[A.col]))
-    positive = pmi > 0
-    M = coo_matrix((pmi[positive], (A.row[positive], A.col[positive])), shape=(n, n)).tocsr()
-    U, S, _ = svds(M.astype(np.float64), k=min(a.dims, n - 2))
-    order = np.argsort(-S)
-    E = U[:, order] * np.sqrt(S[order])
-    E /= np.maximum(np.linalg.norm(E, axis=1, keepdims=True), 1e-9)
-    print(f"graph: {n} artists, {M.nnz} weighted links", flush=True)
+    index, names = {}, []
+    rows, cols, vals = array("i"), array("i"), array("f")
+    users = 0
+    for line in (sys.stdin if a.input == "-" else open(a.input, encoding="utf-8")):
+        seen = False
+        for artist in json.loads(line)["data"]:
+            mbid, count = artist.get("artist_mbid"), artist.get("listen_count", 0)
+            if not mbid or count < a.min_listens:
+                continue
+            if mbid not in index:
+                index[mbid] = len(names)
+                names.append(artist.get("artist_name") or "")
+            rows.append(users); cols.append(index[mbid]); vals.append(math.log1p(count))
+            seen = True
+        users += seen
+    print(f"{users} users, {len(names)} artists, {len(vals)} user-artist pairs", flush=True)
 
+    X = csr_matrix((np.frombuffer(vals, np.float32), (np.frombuffer(rows, np.int32), np.frombuffer(cols, np.int32))),
+                   shape=(users, len(names)))
+    listeners = np.bincount(X.indices, minlength=len(names))
+    keep = np.flatnonzero(listeners >= a.min_listeners)
+    X = X[:, keep]
+    X = diags(1 / np.maximum(np.sqrt(X.multiply(X).sum(axis=1)).A1, 1e-9)) @ X  # each user counts once
+    X = X @ diags(np.log(users / listeners[keep]).astype(np.float32))              # rarer artists say more
+    U, S, Vt = svds(X.astype(np.float64), k=a.dims, random_state=0)
+    E = Vt.T[:, np.argsort(-S)] * np.sqrt(np.sort(S)[::-1])
+    E /= np.maximum(np.linalg.norm(E, axis=1, keepdims=True), 1e-9)
+    print(f"placed {len(keep)} artists with at least {a.min_listeners} listeners", flush=True)
+
+    # When two artists normalize to the same name, the one more people listen to wins
     written = {}
-    for mbid, i in index.items():
-        key = normalize(names.get(mbid) or "")
+    for i in sorted(range(len(keep)), key=lambda i: -listeners[keep[i]]):
+        key = normalize(names[keep[i]])
         if key and key not in written:
             written[key] = E[i]
-    with open(a.out, "w") as f:
-        f.write("# YARG artist map: artists people listen to together sit close together. Built from "
-                "ListenBrainz data (CC0) by Tools/ArtistMap/build_artist_map.py. "
+    # Two decimals place artists as well as three do, and gzip keeps the shipped file small
+    with gzip.open(a.out, "wt", encoding="utf-8", compresslevel=9) as f:
+        f.write(f"# YARG artist map: artists people listen to together sit close together. Built from {a.source} "
+                "(ListenBrainz, CC0) by Tools/ArtistMap/build_artist_map.py. "
                 f"Columns: normalized artist name, then {E.shape[1]} values.\n")
         for key in sorted(written):
-            f.write(key + "\t" + "\t".join(f"{x:.3f}" for x in written[key]) + "\n")
+            f.write(key + "\t" + "\t".join(f"{x:.2f}" for x in written[key]) + "\n")
     print(f"wrote {len(written)} artists to {a.out}", flush=True)
+
 
 main()

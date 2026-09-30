@@ -82,6 +82,7 @@ namespace YARG
             ReplayContainer.Init();
             ScoreContainer.Init();
             RecommendationStore.Init();
+            RecommendationService.PreloadArtistMap();
             PlaylistContainer.Initialize();
             CustomContentManager.Initialize();
             LocalizationManager.Initialize(CommandLineArgs.Language);
