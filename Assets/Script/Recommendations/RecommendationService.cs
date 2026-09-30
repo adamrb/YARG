@@ -217,6 +217,7 @@ namespace YARG.Recommendations
         private const int REFRESH_MEMORY = 3;
         private static readonly Queue<HashSet<string>> _recentlyShown = new();
         private static HashSet<string> _lastShown = new();
+        private static Guid _refreshProfile;
 
         /// <param name="refresh">
         /// True when the player asked for new recommendations: the songs shown recently are skipped.
@@ -228,6 +229,14 @@ namespace YARG.Recommendations
             if (profile == null)
             {
                 return null;
+            }
+
+            // Refresh history belongs to one player
+            if (profile.Id != _refreshProfile)
+            {
+                _refreshProfile = profile.Id;
+                _recentlyShown.Clear();
+                _lastShown = new HashSet<string>();
             }
 
             try

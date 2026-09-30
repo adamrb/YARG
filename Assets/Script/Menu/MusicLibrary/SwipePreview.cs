@@ -51,13 +51,32 @@ namespace YARG.Menu.MusicLibrary
                 }
 
                 double length = mixer.Length;
-                double start = song.PreviewStartSeconds >= 0 && song.PreviewStartSeconds < length
-                    ? song.PreviewStartSeconds
-                    : length >= DEFAULT_START + CLIP_LENGTH ? DEFAULT_START : Math.Max(0, (length - CLIP_LENGTH) / 2);
-                double clip = Math.Min(CLIP_LENGTH, length - start);
+                bool hasStart = song.PreviewStartSeconds >= 0 && song.PreviewStartSeconds < length;
+                bool hasEnd = song.PreviewEndSeconds > 0 && song.PreviewEndSeconds <= length;
+                double start;
+                double end;
+                if (hasStart)
+                {
+                    // The charted preview window, or 30 seconds from its start
+                    start = song.PreviewStartSeconds;
+                    end = hasEnd && song.PreviewEndSeconds > start ? song.PreviewEndSeconds : start + CLIP_LENGTH;
+                }
+                else if (hasEnd)
+                {
+                    end = song.PreviewEndSeconds;
+                    start = Math.Max(0, end - CLIP_LENGTH);
+                }
+                else
+                {
+                    start = length >= DEFAULT_START + CLIP_LENGTH ? DEFAULT_START : Math.Max(0, (length - CLIP_LENGTH) / 2);
+                    end = start + CLIP_LENGTH;
+                }
+
+                double clip = Math.Max(1, Math.Min(end, length) - start);
 
                 var preview = new SwipePreview(mixer, start, clip, volume);
-                _ = preview.Loop();
+                // Seeking and starting playback do synchronous decoder work, so keep them off Unity's thread
+                _ = Task.Run(preview.Loop);
                 return preview;
             }
             catch (OperationCanceledException)
