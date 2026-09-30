@@ -36,7 +36,7 @@ def get(url):
 
 def normalize(name):
     """Mirror of SongNormalizer.Artist in the game: accents removed, brackets removed, lower case,
-    anything that is not a letter or digit becomes a space, and a leading "the " is dropped."""
+    anything that is not a letter or digit becomes a space, "and" is dropped, and so is a leading "the"."""
     text = unicodedata.normalize("NFKD", name)
     text = "".join(c for c in text if not unicodedata.combining(c))
     out, depth = [], 0
@@ -44,8 +44,9 @@ def normalize(name):
         if c in "([{": depth += 1; continue
         if c in ")]}": depth = max(0, depth - 1); continue
         if depth == 0: out.append(c)
-    text = " ".join("".join(c if c.isalnum() else " " for c in "".join(out).lower()).split())
-    return text[4:] if text.startswith("the ") else text
+    words = [w for w in "".join(c if c.isalnum() else " " for c in "".join(out).lower()).split() if w != "and"]
+    if len(words) > 1 and words[0] == "the": words = words[1:]
+    return " ".join(words)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -143,7 +144,7 @@ def main():
 
     written = {}
     for mbid, i in index.items():
-        key = normalize(names.get(mbid, ""))
+        key = normalize(names.get(mbid) or "")
         if key and key not in written:
             written[key] = E[i]
     with open(a.out, "w") as f:
