@@ -338,13 +338,14 @@
             "RecommendedSongsHelp": "Refresh List of Recommended Songs",
             "Recommendations": {
                 "ForYou": "FOR YOU",
-                "ForYouHelp": "Songs Like the Ones You Keep Coming Back To",
+                "ForYouHelp": "Songs Like the Ones You Keep Coming Back To. Select to Refresh",
                 "AtYourLevel": "AT YOUR LEVEL",
-                "AtYourLevelHelp": "Songs You Should Play Well Right Now",
+                "AtYourLevelHelp": "Songs You Should Play Well Right Now. Select to Refresh",
                 "NextStepUp": "NEXT STEP UP",
-                "NextStepUpHelp": "A Little Harder, Easiest First",
+                "NextStepUpHelp": "A Little Harder, Easiest First. Select to Refresh",
                 "Challenge": "CHALLENGE",
-                "ChallengeHelp": "Songs That Will Push You"
+                "Refreshed": "New recommendations",
+                "ChallengeHelp": "Songs That Will Push You. Select to Refresh"
             },
             "SongSwipe": {
                 "Header": "SONG SWIPE",
@@ -423,6 +424,7 @@
                 "Item": {
                     "RandomSong": "Random Song",
                     "SongSwipe": "Song Swipe",
+                    "RefreshRecommendations": "Refresh Recommendations",
                     "BackToTop": "Back to Top",
                     "ScanSongs": "Scan Songs",
                     "SortBy": "Sort By...",

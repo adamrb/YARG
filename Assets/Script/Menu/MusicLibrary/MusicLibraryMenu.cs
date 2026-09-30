@@ -566,12 +566,7 @@ namespace YARG.Menu.MusicLibrary
                             list.Add(new ButtonViewType(
                                 Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind.ToString()),
                                 "MusicLibraryIcons[Recommended]",
-                                () =>
-                                {
-                                    bool selectTopOfList = CurrentSelection is SongViewType songView &&
-                                        _recommendedSongs.Contains(songView.SongEntry);
-                                    RefreshAndReselect(selectTopOfList, preserveSelectedIndex: !selectTopOfList);
-                                },
+                                RefreshRecommendations,
                                 RECOMMENDED_SONGS_ID,
                                 Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind + "Help")
                             ));
@@ -1425,6 +1420,22 @@ namespace YARG.Menu.MusicLibrary
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Rerolls every recommendation row, skipping the songs just shown, and keeps the cursor on the rows.
+        /// </summary>
+        public void RefreshRecommendations()
+        {
+            SetRecommendedSongs(refresh: true);
+            _searchField.Reset();
+            UpdateSearch(true);
+            if (!SetIndexToFirstRecommendedSong())
+            {
+                SelectedIndex = 0;
+            }
+
+            ToastManager.ToastInformation(Localize.Key("Menu.MusicLibrary.Recommendations.Refreshed"));
         }
 
         public void RefreshSidebar()

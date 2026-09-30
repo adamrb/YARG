@@ -961,8 +961,10 @@ namespace YARG.Recommendations
         private const int MAX_PER_ARTIST = 1;
         private const int MAX_GENRE_PER_ROW = 3;
         private const int MAX_GENRE_TOTAL = 6;
-        private const double SWIPE_EXPLORATION = 0.5;
         private const double SWIPE_NOISE = 0.25;
+        private const double SWIPE_TOP_BAND = 0.15;
+        private const double SWIPE_MIDDLE_BAND = 0.6;
+        private const int SWIPE_BAND_SAMPLE = 400;
         private const double FRESHNESS_NOISE = 0.05;
         private const double DISCOVERY_NOISE = 0.5;
 
@@ -974,7 +976,8 @@ namespace YARG.Recommendations
             IReadOnlyCollection<string> favorites,
             int currentDifficulty,
             DateTime now,
-            Random random)
+            Random random,
+            ISet<string> skip = null)
         {
             var taste = TasteModel.Build(library, plays, feedback, quits, favorites, now);
             var skill = SkillModel.Fit(plays, currentDifficulty, now);
@@ -1000,7 +1003,7 @@ namespace YARG.Recommendations
             var discovery = new Dictionary<string, float>();
             var candidates = library.Values
                 .Where(s => s.Canonical && s.ChartDifficulty.HasValue && !recentlyPlayed.Contains(s.Id) &&
-                    !passed.Contains(s.Id))
+                    !passed.Contains(s.Id) && (skip == null || !skip.Contains(s.Key)))
                 .Select(s =>
                 {
                     float tasteScore = taste.Score(s) + (float) (NextGaussian(random) * FRESHNESS_NOISE);
@@ -1101,8 +1104,10 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// Picks songs for Song Swipe. Favors songs from genres and artists the model knows least about,
-        /// spreading picks out so one swipe session covers a lot of ground.
+        /// Picks songs for Song Swipe. A model learns little from answers it could already predict, so each
+        /// batch deliberately mixes songs the profile will probably like, songs the model is unsure about,
+        /// and songs it expects a pass on, aiming for roughly even likes and passes. Within each band it
+        /// favors unexplored genres and artists and never repeats an artist in a batch.
         /// </summary>
         public static List<string> PickSwipeCandidates(
             IReadOnlyDictionary<string, SongFacts> library,
@@ -1125,32 +1130,43 @@ namespace YARG.Recommendations
                     .ToList();
             }
 
-            // Scoring thousands of songs per pick is cheap, but cap the pool to keep swipes instant
-            if (pool.Count > 4000)
+            if (pool.Count == 0)
             {
-                pool = pool.OrderBy(_ => random.Next()).Take(4000).ToList();
+                return new List<string>();
             }
+
+            // Rank the pool by predicted enjoyment, then split it into bands
+            var ranked = pool.OrderByDescending(taste.Score).ToList();
+            int topEnd = Math.Max(1, (int) (ranked.Count * SWIPE_TOP_BAND));
+            int middleEnd = Math.Max(topEnd + 1, (int) (ranked.Count * SWIPE_MIDDLE_BAND));
+            var bands = new[]
+            {
+                ranked.Take(topEnd).ToList(),
+                ranked.Skip(topEnd).Take(middleEnd - topEnd).ToList(),
+                ranked.Skip(middleEnd).ToList(),
+            };
 
             var picked = new List<string>();
             var pickedArtists = new HashSet<string>();
             var extra = new Dictionary<SongFeature, int>();
-            var available = new HashSet<SongFacts>(pool);
-            while (picked.Count < count && available.Count > 0)
+            int band = random.Next(3);
+            int emptyBands = 0;
+            while (picked.Count < count && emptyBands < 3)
             {
+                // Sample a slice of the band so the pick stays quick on big libraries
+                var candidates = bands[band];
                 SongFacts best = null;
                 double bestScore = double.MinValue;
-                foreach (var song in available)
+                int tries = Math.Min(candidates.Count, SWIPE_BAND_SAMPLE);
+                for (int t = 0; t < tries; t++)
                 {
-                    // Never two songs by the same artist in one batch
-                    if (song.Artist != null && pickedArtists.Contains(song.Artist))
+                    var song = candidates[random.Next(candidates.Count)];
+                    if (picked.Contains(song.Key) || (song.Artist != null && pickedArtists.Contains(song.Artist)))
                     {
                         continue;
                     }
 
-                    // Mostly songs the profile will probably enjoy, with a push toward unexplored
-                    // corners of the library so each batch still teaches the model something
-                    double score = taste.Score(song) + SWIPE_EXPLORATION * taste.Uncertainty(song, extra) +
-                        SWIPE_NOISE * NextGumbel(random);
+                    double score = taste.Uncertainty(song, extra) + SWIPE_NOISE * NextGumbel(random);
                     if (score > bestScore)
                     {
                         bestScore = score;
@@ -1158,12 +1174,14 @@ namespace YARG.Recommendations
                     }
                 }
 
+                band = (band + 1) % 3;
                 if (best == null)
                 {
-                    break;
+                    emptyBands++;
+                    continue;
                 }
 
-                available.Remove(best);
+                emptyBands = 0;
                 picked.Add(best.Key);
                 if (best.Artist != null)
                 {

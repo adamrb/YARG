@@ -104,7 +104,7 @@ namespace YARG.Menu.MusicLibrary
             }
         }
 
-        private void SetRecommendedSongs()
+        private void SetRecommendedSongs(bool refresh = false)
         {
             if (!SettingsManager.Settings.ShowRecommendedSongs.Value)
             {
@@ -117,7 +117,7 @@ namespace YARG.Menu.MusicLibrary
             {
                 // Personal recommendations need a human profile; without one, keep the old random picks.
                 // An empty result is respected (for example when everything left was passed on).
-                var sections = RecommendationService.GetSections();
+                var sections = RecommendationService.GetSections(refresh);
                 if (sections != null)
                 {
                     _recommendedSections = sections;

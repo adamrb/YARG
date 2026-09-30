@@ -166,6 +166,12 @@ namespace YARG.Menu.MusicLibrary
 
             if (_musicLibrary.MenuState == MenuState.Library && RecommendationService.GetPrimaryProfile() != null)
             {
+                CreateItem("RefreshRecommendations", () =>
+                {
+                    gameObject.SetActive(false);
+                    _musicLibrary.RefreshRecommendations();
+                });
+
                 CreateItem("SongSwipe", () =>
                 {
                     // Close first so the popup's navigation scheme is gone before swipe mode swaps schemes

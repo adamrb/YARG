@@ -8,6 +8,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Playlists;
 using YARG.Recommendations;
+using YARG.Settings;
 
 namespace YARG.Menu.MusicLibrary
 {
@@ -38,6 +39,8 @@ namespace YARG.Menu.MusicLibrary
         private readonly List<SongEntry> _swipeQueue = new();
         private readonly Stack<SwipeAction> _swipeHistory = new();
         private SongSwipeView _swipeView;
+        private SwipePreview _swipePreview;
+        private CancellationTokenSource _swipePreviewCanceller;
 
         // Review mode walks back through songs already rated
         private bool _swipeReviewing;
@@ -75,6 +78,7 @@ namespace YARG.Menu.MusicLibrary
             }
 
             _mainLibraryIndex = SelectedIndex;
+            ClearPreview();
 
             // Swap the library scheme for the swipe scheme instead of stacking on top of it
             MenuState = MenuState.Swipe;
@@ -121,6 +125,7 @@ namespace YARG.Menu.MusicLibrary
 
         private void CloseSwipeView()
         {
+            StopSwipePreview();
             ClearPreview();
             _swipeSession = null;
             _swipeQueue.Clear();
@@ -333,7 +338,7 @@ namespace YARG.Menu.MusicLibrary
             }
 
             UpdateSwipeHeader();
-            StopPreview(clearCurrentSong: true);
+            StopSwipePreview();
 
             if (_swipeQueue.Count == 0)
             {
@@ -401,21 +406,52 @@ namespace YARG.Menu.MusicLibrary
 
             _swipeQueue.Insert(0, action.Song);
             UpdateSwipeHeader();
-            StopPreview(clearCurrentSong: true);
+            StopSwipePreview();
             _swipeView.Restore(DescribeCard(action.Song), action.Direction, PlaySwipePreview);
         }
 
-        private void PlaySwipePreview()
+        /// <summary>
+        /// Swipe previews use their own player so their loudness can be leveled from card to card.
+        /// </summary>
+        private async void PlaySwipePreview()
         {
+            StopSwipePreview();
             if (_swipeQueue.Count == 0)
             {
                 return;
             }
 
-            StopPreview();
-            _currentSong = _swipeQueue[0];
-            _previewCanceller = new CancellationTokenSource();
-            StartPreview(SWIPE_PREVIEW_DELAY, _previewCanceller);
+            float volume = SettingsManager.Settings.PreviewVolume.Value;
+            if (volume <= 0)
+            {
+                return;
+            }
+
+            var canceller = new CancellationTokenSource();
+            _swipePreviewCanceller = canceller;
+            var preview = await SwipePreview.Create(_swipeQueue[0], volume, SWIPE_PREVIEW_DELAY,
+                SettingsManager.Settings.CensorMatureContent.Value, canceller.Token);
+            if (preview == null)
+            {
+                return;
+            }
+
+            // A newer card may have started its own preview while this one was loading
+            if (_swipePreviewCanceller != canceller || canceller.IsCancellationRequested)
+            {
+                preview.Dispose();
+                return;
+            }
+
+            _swipePreview = preview;
+        }
+
+        private void StopSwipePreview()
+        {
+            _swipePreviewCanceller?.Cancel();
+            _swipePreviewCanceller = null;
+            _swipePreview?.Dispose();
+            _swipePreview = null;
         }
 
         private void PlaySwipeSong()

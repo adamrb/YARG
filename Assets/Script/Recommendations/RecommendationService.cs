@@ -213,7 +213,16 @@ namespace YARG.Recommendations
         /// Builds the recommendation sections for the primary profile, or returns null when there is no
         /// human player (the caller should fall back to the old random recommendations).
         /// </summary>
-        public static List<Section> GetSections()
+        // Songs shown by the last few manual refreshes, so a refresh brings genuinely new picks
+        private const int REFRESH_MEMORY = 3;
+        private static readonly Queue<HashSet<string>> _recentlyShown = new();
+        private static HashSet<string> _lastShown = new();
+
+        /// <param name="refresh">
+        /// True when the player asked for new recommendations: the songs shown recently are skipped.
+        /// Otherwise the model only reflects new history, so lists stay familiar between visits.
+        /// </param>
+        public static List<Section> GetSections(bool refresh = false)
         {
             var profile = GetPrimaryProfile();
             if (profile == null)
@@ -232,7 +241,10 @@ namespace YARG.Recommendations
                     snapshot.Favorites,
                     (int) profile.CurrentDifficulty,
                     DateTime.Now,
-                    _random);
+                    refresh ? _random : new System.Random(profile.Id.GetHashCode() ^ snapshot.Plays.Count ^ (snapshot.Feedback.Count << 8)),
+                    refresh ? RefreshSkipSet() : null);
+
+                _lastShown = new HashSet<string>(result.Songs.Select(s => s.Key));
 
                 WriteReport(snapshot, result);
 
@@ -251,6 +263,17 @@ namespace YARG.Recommendations
                 YargLogger.LogException(e, "Failed to build song recommendations.");
                 return null;
             }
+        }
+
+        private static HashSet<string> RefreshSkipSet()
+        {
+            _recentlyShown.Enqueue(_lastShown);
+            while (_recentlyShown.Count > REFRESH_MEMORY)
+            {
+                _recentlyShown.Dequeue();
+            }
+
+            return new HashSet<string>(_recentlyShown.SelectMany(set => set));
         }
 
         /// <summary>
