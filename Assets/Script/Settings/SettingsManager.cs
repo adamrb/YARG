@@ -86,6 +86,7 @@ namespace YARG.Settings
                 new HeaderMetadata("Other"),
                 nameof(Settings.ReconnectProfiles),
                 nameof(Settings.AutoCreateProfiles),
+                nameof(Settings.PersonalizedRecommendations),
                 new FieldMetadata(nameof(Settings.ShowCursorTimer), isAdvanced: true),
                 nameof(Settings.PauseOnDeviceDisconnect),
                 nameof(Settings.PauseOnFocusLoss),

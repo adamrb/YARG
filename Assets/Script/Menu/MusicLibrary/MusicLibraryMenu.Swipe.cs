@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 using YARG.Core.Input;
@@ -15,8 +15,8 @@ namespace YARG.Menu.MusicLibrary
     /// Song Swipe: a full-screen stack of song cards with the front card's preview playing. Strum down (or
     /// press right) to like it and the card flies right; strum up (or press left) to pass and it flies
     /// left. Orange undoes the last answer, and Select switches to reviewing earlier answers, starting
-    /// with the ones that look most like mistakes. Each answer updates the profile's taste model right
-    /// away, and new cards come from the genres and artists the model knows least about.
+    /// with the ones that look most like mistakes. Each answer updates the profile's taste model, and new
+    /// cards come from the genres and artists the model knows least about.
     /// </summary>
     public partial class MusicLibraryMenu
     {
@@ -33,45 +33,66 @@ namespace YARG.Menu.MusicLibrary
             public bool AddedFavorite;
         }
 
+        [SerializeField]
+        private SongSwipeView _swipeView;
+
         private SwipeSession _swipeSession;
+        private bool _swipeStarting;
         private readonly List<SongEntry> _swipeQueue = new();
         private readonly Stack<SwipeAction> _swipeHistory = new();
-        private SongSwipeView _swipeView;
 
         // Review mode walks back through songs already rated
         private bool _swipeReviewing;
+        private bool _reviewLoading;
         private readonly Dictionary<SongEntry, bool> _reviewAnswers = new();
         private int _reviewTotal;
 
         // New-song cards waiting while the player reviews, so none are lost
         private readonly List<SongEntry> _pendingNewSongs = new();
 
-        // Set while the last card flies away; the end-of-queue step only runs if nothing undid it
-        private bool _swipeEndPending;
-
-        public void EnterSwipeMode()
+        public async void EnterSwipeMode()
         {
-            var session = RecommendationService.StartSwipeSession();
+            if (_swipeStarting || MenuState == MenuState.Swipe)
+            {
+                return;
+            }
+
+            _swipeStarting = true;
+            SwipeSession session;
+            try
+            {
+                session = await RecommendationService.StartSwipeSessionAsync();
+            }
+            finally
+            {
+                _swipeStarting = false;
+            }
+
+            // The player may have moved on while the model was training
+            if (this == null || !isActiveAndEnabled || MenuState != MenuState.Library)
+            {
+                return;
+            }
+
             if (session == null)
             {
                 ToastManager.ToastWarning(Localize.Key(SWIPE_KEY, "NeedsProfile"));
                 return;
             }
 
-            _swipeSession = session;
-            _swipeReviewing = false;
-            _swipeEndPending = false;
-            _swipeHistory.Clear();
-            _swipeQueue.Clear();
-            _pendingNewSongs.Clear();
-            _swipeQueue.AddRange(session.NextSongs(SWIPE_QUEUE_SIZE));
-            if (_swipeQueue.Count == 0 && !StartReviewQueue())
+            var songs = session.NextSongs(SWIPE_QUEUE_SIZE);
+            if (songs.Count == 0 && !session.HasRatings)
             {
-                // Nothing new to rate and nothing rated yet
-                _swipeSession = null;
                 ToastManager.ToastInformation(Localize.Key(SWIPE_KEY, "NothingLeft"));
                 return;
             }
+
+            _swipeSession = session;
+            _swipeReviewing = false;
+            _swipeHistory.Clear();
+            _swipeQueue.Clear();
+            _pendingNewSongs.Clear();
+            _swipeQueue.AddRange(songs);
 
             _mainLibraryIndex = SelectedIndex;
             ClearPreview();
@@ -81,13 +102,10 @@ namespace YARG.Menu.MusicLibrary
             Navigator.Instance.PopScheme();
             SetSwipeNavigationScheme();
 
-            var canvas = GetComponentInParent<Canvas>();
-            var parent = canvas != null ? canvas.rootCanvas.transform : transform;
-            _swipeView = SongSwipeView.Create(parent, _subHeader.font);
             _swipeView.ButtonClicked += Swipe;
             _swipeView.UndoClicked += UndoSwipe;
             _swipeView.ReviewClicked += ToggleSwipeReview;
-
+            _swipeView.Show();
             ShowSwipeStack();
         }
 
@@ -128,15 +146,10 @@ namespace YARG.Menu.MusicLibrary
             _reviewAnswers.Clear();
             _pendingNewSongs.Clear();
             _swipeReviewing = false;
-            _swipeEndPending = false;
-            if (_swipeView != null)
-            {
-                _swipeView.ButtonClicked -= Swipe;
-                _swipeView.UndoClicked -= UndoSwipe;
-                _swipeView.ReviewClicked -= ToggleSwipeReview;
-                Destroy(_swipeView.gameObject);
-                _swipeView = null;
-            }
+            _swipeView.ButtonClicked -= Swipe;
+            _swipeView.UndoClicked -= UndoSwipe;
+            _swipeView.ReviewClicked -= ToggleSwipeReview;
+            _swipeView.Hide();
         }
 
         // The library list stays behind the swipe screen unchanged
@@ -176,30 +189,20 @@ namespace YARG.Menu.MusicLibrary
             return new SongSwipeView.CardInfo { Song = song, Reason = reason, Difficulty = difficulty };
         }
 
-        private SongSwipeView.CardInfo? BackCardInfo()
+        private SongSwipeView.CardInfo? CardAt(int index)
         {
-            return _swipeQueue.Count > 1 ? DescribeCard(_swipeQueue[1]) : null;
+            return index < _swipeQueue.Count ? DescribeCard(_swipeQueue[index]) : null;
         }
 
         private void ShowSwipeStack()
         {
             UpdateSwipeHeader();
-            if (_swipeQueue.Count == 0)
-            {
-                return;
-            }
-
-            _swipeView.SetCards(DescribeCard(_swipeQueue[0]), BackCardInfo());
+            _swipeView.SetCards(CardAt(0), CardAt(1));
             PlaySwipePreview();
         }
 
         private void UpdateSwipeHeader()
         {
-            if (_swipeView == null || _swipeSession == null)
-            {
-                return;
-            }
-
             if (_swipeReviewing)
             {
                 int done = _reviewTotal - _swipeQueue.Count;
@@ -217,33 +220,55 @@ namespace YARG.Menu.MusicLibrary
             }
         }
 
-        private void ToggleSwipeReview()
+        private async void ToggleSwipeReview()
         {
-            if (_swipeSession == null || _swipeView == null)
+            var session = _swipeSession;
+            if (session == null || _reviewLoading)
             {
                 return;
             }
 
             if (!_swipeReviewing)
             {
-                var rated = _swipeSession.RatedSongs();
+                List<(SongEntry Song, bool Liked)> rated;
+                _reviewLoading = true;
+                try
+                {
+                    rated = await session.RatedSongsAsync();
+                }
+                finally
+                {
+                    _reviewLoading = false;
+                }
+
+                // Swipe mode may have closed while the ratings were ranked
+                if (_swipeSession != session)
+                {
+                    return;
+                }
+
                 if (rated.Count == 0)
                 {
-                    // Leave any end-of-queue step in flight alone
                     ToastManager.ToastInformation(Localize.Key(SWIPE_KEY, "NothingToReview"));
                     return;
                 }
 
-                _swipeEndPending = false;
                 _swipeView.CompleteAnimation();
-                var newSongs = new List<SongEntry>(_swipeQueue);
-                StartReviewQueue(rated);
                 _pendingNewSongs.Clear();
-                _pendingNewSongs.AddRange(newSongs);
+                _pendingNewSongs.AddRange(_swipeQueue);
+                _swipeReviewing = true;
+                _swipeQueue.Clear();
+                _reviewAnswers.Clear();
+                foreach (var (song, liked) in rated)
+                {
+                    _swipeQueue.Add(song);
+                    _reviewAnswers[song] = liked;
+                }
+
+                _reviewTotal = _swipeQueue.Count;
             }
             else
             {
-                _swipeEndPending = false;
                 _swipeView.CompleteAnimation();
                 _swipeReviewing = false;
                 _reviewAnswers.Clear();
@@ -252,50 +277,17 @@ namespace YARG.Menu.MusicLibrary
                 _pendingNewSongs.Clear();
                 if (_swipeQueue.Count < SWIPE_QUEUE_SIZE)
                 {
-                    _swipeQueue.AddRange(_swipeSession.NextSongs(SWIPE_QUEUE_SIZE - _swipeQueue.Count));
+                    _swipeQueue.AddRange(session.NextSongs(SWIPE_QUEUE_SIZE - _swipeQueue.Count));
                 }
             }
 
-            _swipeHistory.Clear();
-
-            if (_swipeQueue.Count == 0)
-            {
-                ToastManager.ToastInformation(Localize.Key(SWIPE_KEY, "NothingLeft"));
-                LeaveSwipeMode();
-                return;
-            }
-
+            StopSwipePreview();
             ShowSwipeStack();
-        }
-
-        /// <summary>
-        /// Replaces the queue with the songs already rated, likely mistakes first. Returns false (and
-        /// leaves the queue alone) when nothing has been rated.
-        /// </summary>
-        private bool StartReviewQueue(List<(SongEntry Song, bool Liked)> rated = null)
-        {
-            rated ??= _swipeSession.RatedSongs();
-            if (rated.Count == 0)
-            {
-                return false;
-            }
-
-            _swipeReviewing = true;
-            _swipeQueue.Clear();
-            _reviewAnswers.Clear();
-            foreach (var (song, liked) in rated)
-            {
-                _swipeQueue.Add(song);
-                _reviewAnswers[song] = liked;
-            }
-
-            _reviewTotal = _swipeQueue.Count;
-            return true;
         }
 
         private void Swipe(SwipeDirection direction)
         {
-            if (_swipeSession == null || _swipeView == null || _swipeQueue.Count == 0)
+            if (_swipeSession == null || _swipeQueue.Count == 0)
             {
                 return;
             }
@@ -305,24 +297,23 @@ namespace YARG.Menu.MusicLibrary
 
             var song = _swipeQueue[0];
             var action = new SwipeAction { Song = song, Direction = direction };
-            switch (direction)
+            if (direction != SwipeDirection.Skip)
             {
-                case SwipeDirection.Like:
-                    action.FeedbackToken = _swipeSession.Swipe(song, true);
-                    break;
-                case SwipeDirection.Pass:
-                    action.FeedbackToken = _swipeSession.Swipe(song, false);
-                    break;
-                case SwipeDirection.Favorite:
-                    // A favorite is also a like, which replaces any earlier pass on the song
-                    if (!PlaylistContainer.FavoritesPlaylist.ContainsSong(song))
-                    {
-                        PlaylistContainer.FavoritesPlaylist.AddSong(song);
-                        _swipeSession.Favorite(song);
-                        action.AddedFavorite = true;
-                    }
-                    action.FeedbackToken = _swipeSession.Swipe(song, true);
-                    break;
+                // A favorite is also a like, which replaces any earlier pass on the song
+                bool addFavorite = direction == SwipeDirection.Favorite &&
+                    !PlaylistContainer.FavoritesPlaylist.ContainsSong(song);
+                action.FeedbackToken = _swipeSession.Swipe(song, direction != SwipeDirection.Pass, addFavorite);
+                if (action.FeedbackToken < 0)
+                {
+                    ToastManager.ToastError(Localize.Key(SWIPE_KEY, "SaveFailed"));
+                    return;
+                }
+
+                if (addFavorite)
+                {
+                    PlaylistContainer.FavoritesPlaylist.AddSong(song);
+                    action.AddedFavorite = true;
+                }
             }
 
             _swipeHistory.Push(action);
@@ -334,39 +325,12 @@ namespace YARG.Menu.MusicLibrary
 
             UpdateSwipeHeader();
             StopSwipePreview();
-
-            if (_swipeQueue.Count == 0)
-            {
-                bool reviewing = _swipeReviewing;
-                _swipeEndPending = true;
-                _swipeView.Throw(direction, null, null, () =>
-                {
-                    // An undo while the last card was in flight cancels leaving
-                    if (!_swipeEndPending)
-                    {
-                        return;
-                    }
-
-                    _swipeEndPending = false;
-                    ToastManager.ToastInformation(Localize.Key(SWIPE_KEY, reviewing ? "ReviewDone" : "NothingLeft"));
-                    if (reviewing)
-                    {
-                        ToggleSwipeReview();
-                    }
-                    else
-                    {
-                        LeaveSwipeMode();
-                    }
-                });
-                return;
-            }
-
-            _swipeView.Throw(direction, DescribeCard(_swipeQueue[0]), BackCardInfo(), PlaySwipePreview);
+            _swipeView.Throw(direction, CardAt(0), CardAt(1), PlaySwipePreview);
         }
 
         private void UndoSwipe()
         {
-            if (_swipeSession == null || _swipeView == null)
+            if (_swipeSession == null)
             {
                 return;
             }
@@ -377,16 +341,18 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            // Cancel any end-of-queue step before landing the card still in flight
-            _swipeEndPending = false;
             _swipeView.CompleteAnimation();
+            var action = _swipeHistory.Peek();
+            if (action.FeedbackToken >= 0 && !_swipeSession.UndoSwipe(action.FeedbackToken))
+            {
+                ToastManager.ToastError(Localize.Key(SWIPE_KEY, "UndoFailed"));
+                return;
+            }
 
-            var action = _swipeHistory.Pop();
-            _swipeSession.UndoSwipe(action.FeedbackToken);
+            _swipeHistory.Pop();
             if (action.AddedFavorite)
             {
                 PlaylistContainer.FavoritesPlaylist.RemoveSong(action.Song);
-                _swipeSession.UndoFavorite(action.Song);
             }
 
             _swipeQueue.Insert(0, action.Song);

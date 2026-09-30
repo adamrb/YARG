@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using YARG.Core;
+using System.Threading.Tasks;
 using YARG.Core.Game;
+using YARG.Core.Logging;
 using YARG.Core.Song;
 using YARG.Core.Song.Recommendations;
 using YARG.Localization;
@@ -11,7 +12,8 @@ namespace YARG.Recommendations
 {
     /// <summary>
     /// One Song Swipe session: keeps the library snapshot and the taste model, deals cards, and records
-    /// (and undoes) answers, updating the model after each one.
+    /// (and undoes) answers. Each answer retrains the model in the background; until that finishes, cards
+    /// come from the previous model.
     /// </summary>
     public sealed class SwipeSession
     {
@@ -25,23 +27,32 @@ namespace YARG.Recommendations
 
         private static readonly Random _random = new();
 
+        private sealed class Answer
+        {
+            public int RecordId;
+            public FeedbackFact Fact;
+            public string Favorite;
+        }
+
         private readonly RecommendationService.Snapshot _snapshot;
         private readonly HashSet<string> _dealt;
         private readonly SkillModel _skill;
-        private readonly Dictionary<int, (int RecordId, FeedbackFact Fact)> _answers = new();
+        private readonly Dictionary<int, Answer> _answers = new();
         private TasteModel _taste;
         private int _nextToken;
+        private int _trainings;
 
         public YargProfile Profile => _snapshot.Profile;
         public int LikedCount { get; private set; }
         public int PassedCount { get; private set; }
+        public bool HasRatings => _snapshot.Feedback.Count > 0;
 
-        internal SwipeSession(RecommendationService.Snapshot snapshot)
+        internal SwipeSession(RecommendationService.Snapshot snapshot, SkillModel skill, TasteModel taste)
         {
             _snapshot = snapshot;
+            _skill = skill;
+            _taste = taste;
             _dealt = new HashSet<string>(snapshot.Feedback.Select(f => f.Key));
-            _skill = SkillModel.Fit(snapshot.History);
-            _taste = TasteModel.Build(snapshot.Library, snapshot.History);
         }
 
         public List<SongEntry> NextSongs(int count)
@@ -52,55 +63,74 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// Songs already swiped, likely mistakes first, with the current answer for each.
+        /// Songs already swiped, likely mistakes first, with the current answer for each. Ranking trains
+        /// several models, so it runs in the background.
         /// </summary>
-        public List<(SongEntry Song, bool Liked)> RatedSongs()
+        public async Task<List<(SongEntry Song, bool Liked)>> RatedSongsAsync()
         {
-            return Recommender.RankLikelyMistakes(_snapshot.Library, _snapshot.History)
-                .Select(r => (_snapshot.Songs[r.Key], r.Liked))
-                .ToList();
+            var library = _snapshot.Library;
+            var history = _snapshot.CopyHistory();
+            var ranked = await Task.Run(() => Recommender.RankLikelyMistakes(library, history));
+            return ranked.Select(r => (_snapshot.Songs[r.Key], r.Liked)).ToList();
         }
 
         /// <summary>
-        /// Records a like or pass. Returns a token for <see cref="UndoSwipe"/>, valid even if saving failed.
+        /// Records a like or pass, and optionally that the song was just added to favorites. Returns a
+        /// token for <see cref="UndoSwipe"/>, or -1 if the answer could not be saved (nothing changes then).
         /// </summary>
-        public int Swipe(SongEntry song, bool liked)
+        public int Swipe(SongEntry song, bool liked, bool addedFavorite = false)
         {
             int recordId = RecommendationStore.RecordFeedback(Profile.Id, song.Hash.HashBytes, liked);
-            var fact = new FeedbackFact { Key = song.Hash.ToString(), Liked = liked, Date = DateTime.Now };
-            _snapshot.Feedback.Add(fact);
-            _answers[_nextToken] = (recordId, fact);
+            if (recordId < 0)
+            {
+                return -1;
+            }
+
+            string key = song.Hash.ToString();
+            var answer = new Answer
+            {
+                RecordId = recordId,
+                Fact = new FeedbackFact { Key = key, Liked = liked, Date = DateTime.Now },
+                Favorite = addedFavorite ? key : null,
+            };
+            _snapshot.Feedback.Add(answer.Fact);
+            if (answer.Favorite != null)
+            {
+                _snapshot.Favorites.Add(answer.Favorite);
+            }
+
+            _answers[_nextToken] = answer;
             Count(liked, 1);
             Retrain();
             return _nextToken++;
         }
 
-        public void UndoSwipe(int token)
+        /// <summary>
+        /// Takes back an answer. Returns false if it could not be removed from the database (nothing
+        /// changes then).
+        /// </summary>
+        public bool UndoSwipe(int token)
         {
-            if (!_answers.Remove(token, out var answer))
+            if (!_answers.TryGetValue(token, out var answer))
             {
-                return;
+                return true;
             }
 
-            RecommendationStore.DeleteFeedback(answer.RecordId);
+            if (!RecommendationStore.DeleteFeedback(answer.RecordId))
+            {
+                return false;
+            }
+
+            _answers.Remove(token);
             _snapshot.Feedback.Remove(answer.Fact);
+            if (answer.Favorite != null)
+            {
+                _snapshot.Favorites.Remove(answer.Favorite);
+            }
+
             Count(answer.Fact.Liked, -1);
             Retrain();
-        }
-
-        /// <summary>
-        /// Tells the model the song was just added to favorites.
-        /// </summary>
-        public void Favorite(SongEntry song)
-        {
-            _snapshot.Favorites.Add(song.Hash.ToString());
-            Retrain();
-        }
-
-        public void UndoFavorite(SongEntry song)
-        {
-            _snapshot.Favorites.Remove(song.Hash.ToString());
-            Retrain();
+            return true;
         }
 
         /// <summary>
@@ -149,8 +179,7 @@ namespace YARG.Recommendations
                 return Localize.Key(KEY, "NotCharted");
             }
 
-            var instrument = Profile.HasValidInstrument ? Profile.CurrentInstrument : Instrument.FiveFretGuitar;
-            int intensity = song[instrument].Intensity;
+            int intensity = RecommendationService.PlayablePart(song, _snapshot.Instrument).Intensity;
             float predicted = _skill.PredictSong(facts);
             string band = predicted >= Recommender.AT_LEVEL ? "Comfortable"
                 : predicted >= Recommender.STRETCH ? "Stretch"
@@ -190,9 +219,27 @@ namespace YARG.Recommendations
             else PassedCount += change;
         }
 
-        private void Retrain()
+        /// <summary>
+        /// Trains a new model on the answers so far in the background. Only the newest training's result
+        /// is kept, so answers given in quick succession never leave an older model in place.
+        /// </summary>
+        private async void Retrain()
         {
-            _taste = TasteModel.Build(_snapshot.Library, _snapshot.History);
+            int training = ++_trainings;
+            var library = _snapshot.Library;
+            var history = _snapshot.CopyHistory();
+            try
+            {
+                var taste = await Task.Run(() => TasteModel.Build(library, history));
+                if (training == _trainings)
+                {
+                    _taste = taste;
+                }
+            }
+            catch (Exception e)
+            {
+                YargLogger.LogException(e, "Failed to update the Song Swipe model.");
+            }
         }
     }
 }

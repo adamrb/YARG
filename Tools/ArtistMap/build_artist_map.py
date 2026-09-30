@@ -23,16 +23,20 @@ from array import array
 
 
 def normalize(name):
-    """Mirror of SongNormalizer.Artist in the game: accents removed, brackets removed, lower case,
-    anything that is not a letter or digit becomes a space, "and" is dropped, and so is a leading "the"."""
-    text = unicodedata.normalize("NFKD", name)
-    text = "".join(c for c in text if not unicodedata.combining(c))
+    """The key the game looks artists up by: SongNormalizer.Artist applied to SortString.SearchStr.
+    Keep in step with StringTransformations.RemoveDiacritics and SongNormalizer (see SongNormalizerTests)."""
+    # RemoveDiacritics: "Æ" becomes "AE", marks and format characters go, lower case
+    text = unicodedata.normalize("NFD", name.replace("Æ", "AE"))
+    text = unicodedata.normalize("NFC", "".join(c for c in text if unicodedata.category(c) not in ("Mn", "Mc", "Cf")).lower())
+    # SongNormalizer.Artist: brackets removed, anything but letters and digits becomes a space, "and" is
+    # dropped, and so is a leading "the"
     out, depth = [], 0
     for c in text:
         if c in "([{": depth += 1; continue
         if c in ")]}": depth = max(0, depth - 1); continue
         if depth == 0: out.append(c)
-    words = [w for w in "".join(c if c.isalnum() else " " for c in "".join(out).lower()).split() if w != "and"]
+    letter_or_digit = lambda c: unicodedata.category(c)[0] == "L" or unicodedata.category(c) == "Nd"
+    words = [w for w in "".join(c if letter_or_digit(c) else " " for c in "".join(out)).split() if w != "and"]
     if len(words) > 1 and words[0] == "the": words = words[1:]
     return " ".join(words)
 

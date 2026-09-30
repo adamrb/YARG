@@ -375,7 +375,9 @@
                 "YouLiked": "You liked this",
                 "YouPassed": "You passed on this",
                 "NothingToReview": "No ratings to review yet",
-                "ReviewDone": "All ratings reviewed",
+                "AllDone": "That's all for now. Undo, review your ratings, or go back to the library.",
+                "SaveFailed": "Couldn't save that rating",
+                "UndoFailed": "Couldn't undo that rating",
                 "NothingToUndo": "Nothing to undo",
                 "Summary": "Song Swipe: {0} liked, {1} passed. Recommendations updated.",
                 "NeedsProfile": "Song Swipe needs a player profile",
@@ -1644,6 +1646,10 @@
             "ShowAdvancedMusicLibraryOptions": {
                 "Name": "Show Advanced Music Library Options",
                 "Description": "Adds advanced settings to the \"More Options\" menu in the Music Library such as \"View Song Folder\" and \"Copy Song Checksum\"."
+            },
+            "PersonalizedRecommendations": {
+                "Name": "Personalized Recommendations",
+                "Description": "Recommend songs in the Music Library from what the first player's profile plays, favorites and rates in Song Swipe. When off, recommendations are random."
             },
             "ShowCursorTimer": {
                 "Name": "Cursor Show Time",

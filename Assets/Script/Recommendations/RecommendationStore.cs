@@ -69,16 +69,18 @@ namespace YARG.Recommendations
             string directory = Path.Combine(PathHelper.PersistentDataPath, "recommendations");
             DatabasePath = Path.Combine(directory, "recommendations.db");
 
+            SQLiteConnection db = null;
             try
             {
                 Directory.CreateDirectory(directory);
-                _db = new SQLiteConnection(DatabasePath);
-                _db.CreateTable<SongFeedbackRecord>();
-                _db.CreateTable<SongQuitRecord>();
+                db = new SQLiteConnection(DatabasePath);
+                db.CreateTable<SongFeedbackRecord>();
+                db.CreateTable<SongQuitRecord>();
+                _db = db;
             }
             catch (Exception e)
             {
-                _db = null;
+                db?.Dispose();
                 YargLogger.LogException(e, "Failed to open the recommendation database.");
             }
         }
@@ -115,17 +117,22 @@ namespace YARG.Recommendations
             }
         }
 
-        public static void DeleteFeedback(int id)
+        /// <summary>
+        /// Deletes a saved like or pass (for undo). Returns false if it could not be deleted.
+        /// </summary>
+        public static bool DeleteFeedback(int id)
         {
-            if (_db == null || id < 0) return;
+            if (_db == null || id < 0) return false;
 
             try
             {
                 _db.Delete<SongFeedbackRecord>(id);
+                return true;
             }
             catch (Exception e)
             {
                 YargLogger.LogException(e, "Failed to undo song feedback.");
+                return false;
             }
         }
 

@@ -848,7 +848,8 @@ namespace YARG.Gameplay
                 return;
             }
 
-            foreach (var player in _players)
+            // Players who dropped out earlier left at a different point, so only the ones still playing count
+            foreach (var player in ActivePlayers)
             {
                 var profile = player.Player.Profile;
                 if (profile.IsBot || player.Player.IsReplay)

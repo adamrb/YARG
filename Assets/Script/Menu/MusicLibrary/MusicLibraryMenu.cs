@@ -608,7 +608,8 @@ namespace YARG.Menu.MusicLibrary
                         _primaryHeaderIndex += _recommendedSongs.Length + 1;
                     }
 
-                    if (RecommendationService.GetPrimaryProfile() != null)
+                    // Song Swipe feeds the personal recommendations, so it is offered with them
+                    if (_recommendationRows != null)
                     {
                         list.Add(new ButtonViewType(
                             Localize.Key("Menu.MusicLibrary.SongSwipe.Header"),
@@ -1503,12 +1504,26 @@ namespace YARG.Menu.MusicLibrary
         {
             _noPlayerWarning.SetActive(PlayerContainer.Players.Count <= 0);
             _needsReload = true;
+            RefreshIfRecommendationProfileChanged();
         }
 
         private void OnPlayerRemoved(YargPlayer player)
         {
             _noPlayerWarning.SetActive(PlayerContainer.Players.Count <= 0);
             _needsReload = true;
+            RefreshIfRecommendationProfileChanged();
+        }
+
+        /// <summary>
+        /// The recommendations belong to the first human profile, so rebuild them as soon as it changes.
+        /// </summary>
+        private void RefreshIfRecommendationProfileChanged()
+        {
+            if (RecommendationService.GetPrimaryProfile()?.Id != _recommendationProfile &&
+                MenuState == MenuState.Library && isActiveAndEnabled)
+            {
+                RefreshAndReselect();
+            }
         }
 
         public static void ResetMainLibraryIndex()

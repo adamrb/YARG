@@ -164,7 +164,8 @@ namespace YARG.Menu.MusicLibrary
                 });
             }
 
-            if (_musicLibrary.MenuState == MenuState.Library && RecommendationService.GetPrimaryProfile() != null)
+            if (_musicLibrary.MenuState == MenuState.Library && RecommendationService.GetPrimaryProfile() != null &&
+                SettingsManager.Settings.PersonalizedRecommendations.Value)
             {
                 CreateItem("RefreshRecommendations", () =>
                 {

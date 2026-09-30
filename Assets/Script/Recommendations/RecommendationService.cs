@@ -13,6 +13,7 @@ using YARG.Helpers;
 using YARG.Player;
 using YARG.Playlists;
 using YARG.Scores;
+using YARG.Settings;
 using YARG.Song;
 
 namespace YARG.Recommendations
@@ -35,23 +36,48 @@ namespace YARG.Recommendations
         internal sealed class Snapshot
         {
             public YargProfile Profile;
-            public Dictionary<string, SongFacts> Library;
-            public Dictionary<string, SongEntry> Songs;
+            public Instrument Instrument;
+            public IReadOnlyDictionary<string, SongFacts> Library;
+            public IReadOnlyDictionary<string, SongEntry> Songs;
             public ProfileHistory History;
 
             // The history's lists, kept mutable so a swipe session can add answers as they happen
             public List<FeedbackFact> Feedback;
             public List<string> Favorites;
+
+            /// <summary>
+            /// The history as it is now, safe to read on another thread while the lists keep changing.
+            /// </summary>
+            public ProfileHistory CopyHistory() => new()
+            {
+                Plays = History.Plays,
+                Quits = History.Quits,
+                Feedback = Feedback.ToList(),
+                Favorites = Favorites.ToList(),
+                CurrentDifficulty = History.CurrentDifficulty,
+                Now = DateTime.Now,
+            };
         }
 
         // How many manual refreshes back a song stays hidden, so a refresh brings genuinely new picks
         private const int REFRESH_MEMORY = 3;
 
         private static readonly Random _random = new();
-        private static readonly Queue<HashSet<string>> _shownBeforeRefresh = new();
-        private static HashSet<string> _lastShown = new();
-        private static Guid _lastProfile;
         private static readonly Lazy<ArtistMap> _artistMap = new(LoadArtistMap);
+
+        // The library as the recommender sees it, rebuilt only when the songs or the profile's part change
+        private static SongEntry[] _librarySongs;
+        private static (Instrument, Difficulty) _libraryPart;
+        private static Dictionary<string, SongFacts> _library;
+        private static Dictionary<string, SongEntry> _entries;
+
+        // The rows last built and the models behind them. Coming back to the library shows the same rows
+        // (including a refresh's) until the history changes, and a refresh reuses the models.
+        private static int _rowsStamp;
+        private static TasteModel _taste;
+        private static SkillModel _skill;
+        private static List<Row> _rows;
+        private static readonly Queue<HashSet<string>> _shownBeforeRefresh = new();
 
         /// <summary>
         /// The profile recommendations are made for: the first human player, as the score sorts use.
@@ -63,7 +89,7 @@ namespace YARG.Recommendations
 
         /// <summary>
         /// Builds the recommendation rows for the primary profile, or returns null when there is no human
-        /// player (the caller then keeps the old random recommendations).
+        /// player or personal recommendations are off (the caller then keeps the old random picks).
         /// </summary>
         /// <param name="refresh">
         /// True when the player asked for new picks: songs shown by the last few refreshes are skipped.
@@ -72,32 +98,46 @@ namespace YARG.Recommendations
         public static List<Row> GetRows(bool refresh = false)
         {
             var profile = GetPrimaryProfile();
-            if (profile == null)
+            if (profile == null || !SettingsManager.Settings.PersonalizedRecommendations.Value)
             {
                 return null;
-            }
-
-            if (profile.Id != _lastProfile)
-            {
-                _lastProfile = profile.Id;
-                _shownBeforeRefresh.Clear();
-                _lastShown = new HashSet<string>();
             }
 
             try
             {
                 var snapshot = TakeSnapshot(profile);
                 var history = snapshot.History;
-                var random = refresh
-                    ? _random
-                    : new Random(HashCode.Combine(profile.Id, history.Plays.Count, history.Feedback.Count));
-                var result = Recommender.Recommend(snapshot.Library, history, random, refresh ? SkipForRefresh() : null);
-                _lastShown = new HashSet<string>(result.Songs.Select(s => s.Song.Key));
+                int stamp = HashCode.Combine(profile.Id, _library, history.Plays.Count, history.Feedback.Count,
+                    history.Quits.Count, history.Favorites.Aggregate(0, (hash, key) => hash ^ key.GetHashCode()));
+                if (stamp != _rowsStamp || _taste == null)
+                {
+                    _rowsStamp = stamp;
+                    _taste = TasteModel.Build(snapshot.Library, history);
+                    _skill = SkillModel.Fit(history);
+                    _rows = null;
+                    _shownBeforeRefresh.Clear();
+                }
 
-                return result.Songs
+                if (_rows != null && !refresh)
+                {
+                    return _rows;
+                }
+
+                var skip = refresh ? SkipForRefresh() : null;
+                var random = refresh ? _random : new Random(stamp);
+                var songs = Recommender.Recommend(snapshot.Library, history, _taste, _skill, random, skip);
+                if (songs.Count == 0 && skip != null)
+                {
+                    // The last few refreshes used up every candidate, so start over
+                    _shownBeforeRefresh.Clear();
+                    songs = Recommender.Recommend(snapshot.Library, history, _taste, _skill, random);
+                }
+
+                _rows = songs
                     .GroupBy(s => s.Kind)
                     .Select(g => new Row { Kind = g.Key, Songs = g.Select(s => snapshot.Songs[s.Song.Key]).ToArray() })
                     .ToList();
+                return _rows;
             }
             catch (Exception e)
             {
@@ -106,7 +146,11 @@ namespace YARG.Recommendations
             }
         }
 
-        public static SwipeSession StartSwipeSession()
+        /// <summary>
+        /// Starts a Song Swipe session for the primary profile, training its model in the background.
+        /// Returns null when there is no human player or the session could not be built.
+        /// </summary>
+        public static async Task<SwipeSession> StartSwipeSessionAsync()
         {
             var profile = GetPrimaryProfile();
             if (profile == null)
@@ -116,7 +160,10 @@ namespace YARG.Recommendations
 
             try
             {
-                return new SwipeSession(TakeSnapshot(profile));
+                var snapshot = TakeSnapshot(profile);
+                var (skill, taste) = await Task.Run(() =>
+                    (SkillModel.Fit(snapshot.History), TasteModel.Build(snapshot.Library, snapshot.History)));
+                return new SwipeSession(snapshot, skill, taste);
             }
             catch (Exception e)
             {
@@ -125,9 +172,19 @@ namespace YARG.Recommendations
             }
         }
 
+        /// <summary>
+        /// Starts loading the artist map in the background, so the first recommendations do not wait on it.
+        /// </summary>
+        public static void PreloadArtistMap() => Task.Run(() => _artistMap.Value);
+
         private static HashSet<string> SkipForRefresh()
         {
-            _shownBeforeRefresh.Enqueue(_lastShown);
+            if (_rows != null)
+            {
+                _shownBeforeRefresh.Enqueue(new HashSet<string>(_rows.SelectMany(row => row.Songs)
+                    .Select(song => song.Hash.ToString())));
+            }
+
             while (_shownBeforeRefresh.Count > REFRESH_MEMORY)
             {
                 _shownBeforeRefresh.Dequeue();
@@ -136,38 +193,11 @@ namespace YARG.Recommendations
             return new HashSet<string>(_shownBeforeRefresh.SelectMany(set => set));
         }
 
-        internal static Snapshot TakeSnapshot(YargProfile profile)
+        private static Snapshot TakeSnapshot(YargProfile profile)
         {
             var instrument = profile.HasValidInstrument ? profile.CurrentInstrument : Instrument.FiveFretGuitar;
             var difficulty = profile.CurrentDifficulty;
-            var map = _artistMap.Value;
-
-            var library = new Dictionary<string, SongFacts>();
-            var songs = new Dictionary<string, SongEntry>();
-            foreach (var song in SongContainer.Songs)
-            {
-                string key = song.Hash.ToString();
-                if (song.IsDuplicate || songs.ContainsKey(key))
-                {
-                    continue;
-                }
-
-                // SearchStr has rich-text tags and diacritics removed, so markup never becomes a feature
-                int year = song.YearAsNumber != int.MaxValue ? song.YearAsNumber : 0;
-                library[key] = new SongFacts
-                {
-                    Key = key,
-                    Features = SongNormalizer.Features(song.Artist.SearchStr, song.Genre.SearchStr,
-                        song.Subgenre.SearchStr, song.Charter.SearchStr, song.Source.SearchStr, year,
-                        song.SongLengthSeconds),
-                    ChartDifficulty = ChartDifficulty(song, instrument, difficulty, 1f),
-                    Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
-                    ArtistPosition = map.Find(song.Artist.SearchStr),
-                };
-                songs[key] = song;
-            }
-
-            SongNormalizer.AssignCanonical(library.Values.Select(facts => (facts, songs[facts.Key].Name.SearchStr)));
+            BuildLibrary(instrument, difficulty);
 
             var plays = ScoreContainer.GetPlayerHistory(profile.Id)
                 .Where(record => record.SongChecksum != null && record.Percent != null)
@@ -182,7 +212,7 @@ namespace YARG.Recommendations
                         OnCurrentInstrument = record.Instrument == instrument,
                         OnCurrentDifficulty = record.Difficulty == difficulty,
                         SongSpeed = record.SongSpeed > 0f ? record.SongSpeed : 1f,
-                        ChartDifficulty = songs.TryGetValue(key, out var song)
+                        ChartDifficulty = _entries.TryGetValue(key, out var song)
                             ? ChartDifficulty(song, record.Instrument, record.Difficulty, record.SongSpeed)
                             : null,
                     };
@@ -201,8 +231,9 @@ namespace YARG.Recommendations
             return new Snapshot
             {
                 Profile = profile,
-                Library = library,
-                Songs = songs,
+                Instrument = instrument,
+                Library = _library,
+                Songs = _entries,
                 Feedback = feedback,
                 Favorites = favorites,
                 History = new ProfileHistory
@@ -211,29 +242,79 @@ namespace YARG.Recommendations
                     Feedback = feedback,
                     Quits = quits,
                     Favorites = favorites,
-                    CurrentDifficulty = (int) difficulty,
+                    CurrentDifficulty = difficulty,
                     Now = DateTime.Now,
                 },
             };
         }
 
+        private static void BuildLibrary(Instrument instrument, Difficulty difficulty)
+        {
+            var songs = SongContainer.Songs;
+            if (_library != null && ReferenceEquals(songs, _librarySongs) && _libraryPart == (instrument, difficulty))
+            {
+                return;
+            }
+
+            var map = _artistMap.Value;
+            var library = new Dictionary<string, SongFacts>();
+            var entries = new Dictionary<string, SongEntry>();
+            foreach (var song in songs)
+            {
+                string key = song.Hash.ToString();
+                if (song.IsDuplicate || entries.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                // SearchStr has rich-text tags and diacritics removed, so markup never becomes a feature
+                int year = song.YearAsNumber != int.MaxValue ? song.YearAsNumber : 0;
+                library[key] = new SongFacts
+                {
+                    Key = key,
+                    Features = SongNormalizer.Features(song.Artist.SearchStr, song.Genre.SearchStr,
+                        song.Subgenre.SearchStr, song.Charter.SearchStr, song.Source.SearchStr, year,
+                        song.SongLengthSeconds),
+                    ChartDifficulty = ChartDifficulty(song, instrument, difficulty, 1f),
+                    Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
+                    ArtistPosition = map.Find(song.Artist.SearchStr),
+                };
+                entries[key] = song;
+            }
+
+            SongNormalizer.AssignCanonical(library.Values.Select(facts => (facts, entries[facts.Key].Name.SearchStr)));
+            _librarySongs = songs;
+            _libraryPart = (instrument, difficulty);
+            _library = library;
+            _entries = entries;
+        }
+
+        /// <summary>
+        /// The part a song is played with on an instrument, using the same lane conversions as the
+        /// difficulty select: 5-lane drums play on 4-lane and Pro Drums, and 4-lane charts play on 5-lane.
+        /// </summary>
+        internal static PartValues PlayablePart(SongEntry song, Instrument instrument)
+        {
+            var part = song[instrument];
+            if (part.IsActive())
+            {
+                return part;
+            }
+
+            return instrument switch
+            {
+                Instrument.FourLaneDrums or Instrument.ProDrums => song[Instrument.FiveLaneDrums],
+                Instrument.FiveLaneDrums                         => song[Instrument.ProDrums],
+                _                                                => part,
+            };
+        }
+
         /// <summary>
         /// The recommender's difficulty number for a song's part, or null if it cannot be played that way.
-        /// Uses the same lane conversions as the difficulty select: 5-lane drums play on 4-lane and Pro
-        /// Drums, and 4-lane charts play on 5-lane.
         /// </summary>
         private static float? ChartDifficulty(SongEntry song, Instrument instrument, Difficulty difficulty, float songSpeed)
         {
-            var part = song[instrument];
-            if (!part.IsActive())
-            {
-                part = instrument switch
-                {
-                    Instrument.FourLaneDrums or Instrument.ProDrums => song[Instrument.FiveLaneDrums],
-                    Instrument.FiveLaneDrums                         => song[Instrument.ProDrums],
-                    _                                                => part,
-                };
-            }
+            var part = PlayablePart(song, instrument);
 
             // Vocals do not track difficulties per part in song metadata
             bool isVocals = instrument is Instrument.Vocals or Instrument.Harmony;
@@ -242,13 +323,8 @@ namespace YARG.Recommendations
                 return null;
             }
 
-            return SkillModel.ChartDifficulty(part.Intensity, (int) difficulty, songSpeed);
+            return SkillModel.ChartDifficulty(part.Intensity, difficulty, songSpeed);
         }
-
-        /// <summary>
-        /// Starts loading the artist map in the background, so the first recommendations do not wait on it.
-        /// </summary>
-        public static void PreloadArtistMap() => Task.Run(() => _artistMap.Value);
 
         /// <summary>
         /// The artist map shipped in StreamingAssets/recommendations/artist-map.tsv.gz. A missing file just

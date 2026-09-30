@@ -23,6 +23,7 @@ namespace YARG.Menu.MusicLibrary
 #nullable enable
         private static SongEntry[]? _recommendedSongs;
         private static List<RecommendationService.Row>? _recommendationRows;
+        private static Guid? _recommendationProfile;
 #nullable disable
 
         private static string _currentSearch = string.Empty;
@@ -113,6 +114,7 @@ namespace YARG.Menu.MusicLibrary
             }
 
             _recommendationRows = null;
+            _recommendationProfile = RecommendationService.GetPrimaryProfile()?.Id;
             if (SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT)
             {
                 // Personal recommendations need a human profile; without one, keep the old random picks.
