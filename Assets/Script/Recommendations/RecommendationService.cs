@@ -64,7 +64,7 @@ namespace YARG.Recommendations
         private const int REFRESH_MEMORY = 3;
 
         private static readonly Random _random = new();
-        private static readonly Lazy<ArtistMap> _artistMap = new(LoadArtistMap);
+        private static readonly Lazy<SongMap> _songMap = new(LoadSongMap);
 
         // The library as the recommender sees it, rebuilt only when the songs or the profile's part change
         private static SongEntry[] _librarySongs;
@@ -180,9 +180,9 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// Starts loading the artist map in the background, so the first recommendations do not wait on it.
+        /// Starts loading the song map in the background, so the first recommendations do not wait on it.
         /// </summary>
-        public static void PreloadArtistMap() => Task.Run(() => _artistMap.Value);
+        public static void PreloadSongMap() => Task.Run(() => _songMap.Value);
 
         private static HashSet<string> SkipForRefresh()
         {
@@ -263,7 +263,7 @@ namespace YARG.Recommendations
                 return;
             }
 
-            var map = _artistMap.Value;
+            var map = _songMap.Value;
             var library = new Dictionary<string, SongFacts>();
             var entries = new Dictionary<string, SongEntry>();
             foreach (var song in songs)
@@ -276,15 +276,16 @@ namespace YARG.Recommendations
 
                 // SearchStr has rich-text tags and diacritics removed, so markup never becomes a feature
                 int year = song.YearAsNumber != int.MaxValue ? song.YearAsNumber : 0;
+                var (position, popularity) = map.Place(song.Artist.SearchStr, song.Name.SearchStr);
                 library[key] = new SongFacts
                 {
                     Key = key,
                     Features = SongNormalizer.Features(song.Artist.SearchStr, song.Genre.SearchStr,
                         song.Subgenre.SearchStr, song.Charter.SearchStr, song.Source.SearchStr, year,
-                        song.SongLengthSeconds),
+                        song.SongLengthSeconds).Concat(popularity).ToArray(),
                     ChartDifficulty = ChartDifficulty(song, instrument, difficulty, 1f),
                     Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
-                    ArtistPosition = map.Find(song.Artist.SearchStr),
+                    Position = position,
                 };
                 entries[key] = song;
             }
@@ -312,28 +313,28 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// The artist map shipped in StreamingAssets/recommendations/artist-map.tsv.gz. A missing file just
-        /// means no map-based signal.
+        /// The song map shipped in StreamingAssets/recommendations/song-map.tsv.gz. A missing file just means
+        /// no map-based signal.
         /// </summary>
-        private static ArtistMap LoadArtistMap()
+        private static SongMap LoadSongMap()
         {
             try
             {
-                string path = Path.Combine(PathHelper.StreamingAssetsPath, "recommendations", "artist-map.tsv.gz");
+                string path = Path.Combine(PathHelper.StreamingAssetsPath, "recommendations", "song-map.tsv.gz");
                 if (File.Exists(path))
                 {
                     using var reader = new StreamReader(new GZipStream(File.OpenRead(path), CompressionMode.Decompress));
-                    var map = ArtistMap.Parse(ReadLines(reader));
-                    YargLogger.LogFormatInfo("Loaded artist map with {0} artists", map.Count);
+                    var map = SongMap.Parse(ReadLines(reader));
+                    YargLogger.LogFormatInfo("Loaded song map with {0} songs and {1} artists", map.TrackCount, map.ArtistCount);
                     return map;
                 }
             }
             catch (Exception e)
             {
-                YargLogger.LogException(e, "Failed to load the artist map.");
+                YargLogger.LogException(e, "Failed to load the song map.");
             }
 
-            return ArtistMap.Empty;
+            return SongMap.Empty;
         }
 
         private static IEnumerable<string> ReadLines(TextReader reader)

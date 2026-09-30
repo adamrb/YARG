@@ -208,7 +208,7 @@ Some libraries/assets are **packaged** with the source code have licenses that m
 | [Haukcode.sACN](https://github.com/HakanL/Haukcode.sACN) | [MIT](https://github.com/HakanL/Haukcode.sACN/blob/master/LICENSE) |
 | [aperitif chatter.wav by soundslikewillem](https://freesound.org/s/449550/)|[Attribution NonCommercial 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 | [Crowd after Encore.wav by soundslikewillem](https://freesound.org/s/193064/)|[Attribution NonCommercial 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
-| Artist map (`StreamingAssets/recommendations/artist-map.tsv.gz`), built from [ListenBrainz](https://listenbrainz.org/) data dumps | [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
+| Song map (`StreamingAssets/recommendations/song-map.tsv.gz`), built from [ListenBrainz](https://listenbrainz.org/) data dumps | [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
 
 Please note that other libraries are **not** directly packaged within the source code, and are to be installed by NuGet, Unity's packaged manager, or via a Git submodule.
 

@@ -20,8 +20,9 @@ namespace YARG.Recommendations
     {
         private const string KEY = "Menu.MusicLibrary.SongSwipe";
 
-        // How close two artists must be on the artist map for "Fans of X play this"
-        private const float FANS_OF_SIMILARITY = 0.6f;
+        // How close a liked song must sit on the song map for "Fans of X play this" (about the closest 3% of
+        // random pairs)
+        private const float FANS_OF_SIMILARITY = 0.5f;
 
         // How strongly the model must lean for "More from X" and "You play a lot of X"
         private const float STRONG_WEIGHT = 0.3f;
@@ -190,7 +191,7 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// The liked artist closest to this song's artist on the artist map, if close enough.
+        /// The artist of the liked song closest to this one on the song map, if close enough.
         /// </summary>
         private string ClosestLikedArtist(SongFacts facts)
         {
@@ -203,7 +204,7 @@ namespace YARG.Recommendations
                     continue;
                 }
 
-                float similarity = ArtistMap.Similarity(facts.ArtistPosition, liked.ArtistPosition);
+                float similarity = SongMap.Similarity(facts.Position, liked.Position);
                 if (similarity > bestSimilarity)
                 {
                     bestSimilarity = similarity;
