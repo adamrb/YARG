@@ -351,6 +351,7 @@
                 "HeaderHelp": "Strum Down to Like, Up to Pass",
                 "Counts": "{0} LIKED   {1} PASSED",
                 "ReasonArtist": "More from {0}",
+                "ReasonFansOf": "Fans of {0} play this",
                 "ReasonGenre": "You play a lot of {0}",
                 "ReasonNewGenre": "New genre for you: {0}",
                 "ReasonDifferent": "Something different",

@@ -29,6 +29,33 @@ namespace YARG.Recommendations
 
         private static readonly System.Random _random = new();
 
+        private static ArtistMap _artistMap;
+
+        /// <summary>
+        /// The co-listening artist map shipped with the game (StreamingAssets/recommendations/artist-map.tsv).
+        /// Loaded once; an empty map if the file is missing, which just means no map-based signal.
+        /// </summary>
+        private static ArtistMap Map
+        {
+            get
+            {
+                if (_artistMap != null) return _artistMap;
+                try
+                {
+                    string path = Path.Combine(YARG.Helpers.PathHelper.StreamingAssetsPath, "recommendations", "artist-map.tsv");
+                    _artistMap = File.Exists(path) ? ArtistMap.Parse(File.ReadLines(path)) : ArtistMap.Parse(Array.Empty<string>());
+                    YargLogger.LogFormatInfo("Loaded artist map with {0} artists", _artistMap.Count);
+                }
+                catch (Exception e)
+                {
+                    YargLogger.LogException(e, "Failed to load the artist map.");
+                    _artistMap = ArtistMap.Parse(Array.Empty<string>());
+                }
+
+                return _artistMap;
+            }
+        }
+
         /// <summary>
         /// The profile recommendations are made for: the first human player, like the score sorts use.
         /// </summary>
@@ -76,6 +103,7 @@ namespace YARG.Recommendations
                     Features = GetFeatures(song),
                     ChartDifficulty = GetChartDifficulty(song, instrument, difficulty, 1f),
                     Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
+                    Embedding = Map.Find(song.Artist.SearchStr),
                 };
                 songs[key] = song;
             }
@@ -269,7 +297,12 @@ namespace YARG.Recommendations
                 var genre = new SongFeature(FeatureType.Genre, SongNormalizer.Collapse(song.Genre.SearchStr));
 
                 string reason;
-                if (_taste.Affinity(artist) > 0.3f)
+                string fanOf = ClosestLikedArtist(song);
+                if (fanOf != null)
+                {
+                    reason = Localize.KeyFormat((KEY, "ReasonFansOf"), fanOf);
+                }
+                else if (_taste.Affinity(artist) > 0.3f)
                 {
                     reason = Localize.KeyFormat((KEY, "ReasonArtist"), song.Artist.Original);
                 }
@@ -339,6 +372,40 @@ namespace YARG.Recommendations
 
                 Rebuild();
                 return token;
+            }
+
+            private const float FANS_OF_SIMILARITY = 0.6f;
+
+            /// <summary>
+            /// The artist the profile likes that sits closest to this song's artist on the co-listening
+            /// map, if close enough (and not the same artist), for "Fans of X play this" reasons.
+            /// </summary>
+            private string ClosestLikedArtist(SongEntry song)
+            {
+                if (!_snapshot.Library.TryGetValue(song.Hash.ToString(), out var facts) || facts.Embedding == null)
+                {
+                    return null;
+                }
+
+                string best = null;
+                float bestSimilarity = FANS_OF_SIMILARITY;
+                foreach (var (key, evidence) in _taste.Evidence)
+                {
+                    if (evidence <= 0f || !_snapshot.Library.TryGetValue(key, out var liked) || liked.Embedding == null ||
+                        liked.Artist == facts.Artist)
+                    {
+                        continue;
+                    }
+
+                    float similarity = ArtistMap.Similarity(facts.Embedding, liked.Embedding);
+                    if (similarity > bestSimilarity)
+                    {
+                        bestSimilarity = similarity;
+                        best = _snapshot.Songs[key].Artist.Original;
+                    }
+                }
+
+                return best == null ? null : SongNormalizer.StripBrackets(best).Trim();
             }
 
             public void UndoSwipe(int token)

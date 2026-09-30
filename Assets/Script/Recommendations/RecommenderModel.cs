@@ -65,6 +65,11 @@ namespace YARG.Recommendations
 
         public string Id => Identity ?? Key;
 
+        /// <summary>
+        /// Where the song's artist sits on the co-listening map (see <see cref="ArtistMap"/>), or null.
+        /// </summary>
+        public float[] Embedding;
+
         public string Artist => First(FeatureType.Artist);
         public string Genre => First(FeatureType.Genre);
 
@@ -334,6 +339,15 @@ namespace YARG.Recommendations
         private readonly Dictionary<string, float> _evidence = new();
         private float _baseline;
         private float _evidenceTotal;
+        private PreferenceModel _learned;
+
+        /// <summary>
+        /// When true (the default) scores come from a <see cref="PreferenceModel"/> trained on the
+        /// profile's own history. False falls back to the hand-weighted averages, kept for comparison.
+        /// </summary>
+        public static bool UseLearnedModel = true;
+
+        public bool IsLearned => _learned != null;
 
         public IReadOnlyDictionary<string, float> Evidence => _evidence;
 
@@ -348,7 +362,8 @@ namespace YARG.Recommendations
             IEnumerable<FeedbackFact> feedback,
             IEnumerable<QuitFact> quits,
             IEnumerable<string> favorites,
-            DateTime now)
+            DateTime now,
+            ISet<string> heldOut = null)
         {
             var model = new TasteModel();
 
@@ -426,6 +441,11 @@ namespace YARG.Recommendations
             }
 
             model.ObservedSongCount = known.Count;
+            if (UseLearnedModel && known.Count > 0)
+            {
+                model._learned = PreferenceModel.Train(library, model._evidence, model._baseline, heldOut);
+            }
+
             return model;
         }
 
@@ -437,6 +457,11 @@ namespace YARG.Recommendations
 
         public float Affinity(SongFeature feature)
         {
+            if (_learned != null)
+            {
+                return _learned.Weight(feature);
+            }
+
             if (!_features.TryGetValue(feature, out var entry))
             {
                 return 0f;
@@ -455,7 +480,7 @@ namespace YARG.Recommendations
         /// </summary>
         public float Score(SongFacts song)
         {
-            return WeightedAverageByType(song.Features, Affinity);
+            return _learned != null ? _learned.Score(song) : WeightedAverageByType(song.Features, Affinity);
         }
 
         /// <summary>
@@ -532,6 +557,233 @@ namespace YARG.Recommendations
                 .Select(kv => (kv.Key, Affinity(kv.Key), kv.Value.Count))
                 .OrderByDescending(f => Math.Abs(f.Item2))
                 .Take(count);
+        }
+    }
+
+    /// <summary>
+    /// Artist positions on a co-listening map built from ListenBrainz similar-artist data (CC0): artists
+    /// that the same people listen to sit close together. Loaded from a tab-separated file of
+    /// "normalized artist name" followed by the embedding values.
+    /// </summary>
+    public sealed class ArtistMap
+    {
+        private readonly Dictionary<string, float[]> _positions = new();
+
+        public int Count => _positions.Count;
+
+        public static ArtistMap Parse(IEnumerable<string> lines)
+        {
+            var map = new ArtistMap();
+            foreach (string line in lines)
+            {
+                var parts = line.Split('\t');
+                if (parts.Length < 3) continue;
+                var values = new float[parts.Length - 1];
+                bool ok = true;
+                for (int i = 1; i < parts.Length && ok; i++)
+                {
+                    ok = float.TryParse(parts[i], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out values[i - 1]);
+                }
+
+                if (ok) map._positions[parts[0]] = values;
+            }
+
+            return map;
+        }
+
+        /// <param name="artist">An artist as written in song metadata; it is normalized here.</param>
+        public float[] Find(string artist)
+        {
+            return _positions.TryGetValue(SongNormalizer.Artist(artist), out var position) ? position : null;
+        }
+
+        public static float Similarity(float[] a, float[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return 0f;
+            float dot = 0f;
+            for (int i = 0; i < a.Length; i++) dot += a[i] * b[i];
+            return dot;
+        }
+    }
+
+    /// <summary>
+    /// A per-profile preference model learned from the profile's own behavior: an L2-regularized
+    /// logistic regression over every song feature (each artist, genre word, decade, source game,
+    /// charter and length bucket gets its own learned weight).
+    /// </summary>
+    /// <remarks>
+    /// Training examples come from the taste evidence: songs with positive evidence (return visits,
+    /// favorites, likes) are positives weighted by how strong the evidence is, songs with negative
+    /// evidence (passes, quits) are negatives. A deterministic sample of songs the profile never touched
+    /// is added as weak negatives, the usual trick for implicit feedback: in a big library, a random song
+    /// is more likely than not to be one the player would not pick. No weights are hand-tuned per feature
+    /// type; the model decides from the data what matters for this player.
+    /// </remarks>
+    public sealed class PreferenceModel
+    {
+        private const float MAX_EXAMPLE_WEIGHT = 3f;
+        private const float IMPLICIT_NEGATIVE_WEIGHT = 0.2f;
+        private const int IMPLICIT_NEGATIVES_PER_POSITIVE = 4;
+        private const int MIN_IMPLICIT_NEGATIVES = 100;
+        private const float L2 = 1.0f;
+        private const float LEARNING_RATE = 0.5f;
+        private const int ITERATIONS = 300;
+
+        // Embeddings are unit length; scaling them up lets the same L2 penalty suit both feature kinds
+        private const float EMBEDDING_SCALE = 4f;
+
+        private readonly Dictionary<SongFeature, int> _index = new();
+        private float[] _weights = Array.Empty<float>();
+        private float[] _direction = Array.Empty<float>();
+        private float _bias;
+
+        /// <summary>
+        /// The learned "taste direction" on the artist map: songs whose artist points this way score higher.
+        /// </summary>
+        public IReadOnlyList<float> Direction => _direction;
+
+        public float Weight(SongFeature feature)
+        {
+            return _index.TryGetValue(feature, out int i) ? _weights[i] : 0f;
+        }
+
+        public float Score(SongFacts song)
+        {
+            float score = _bias;
+            foreach (var feature in song.Features)
+            {
+                if (_index.TryGetValue(feature, out int i)) score += _weights[i];
+            }
+
+            if (song.Embedding != null && song.Embedding.Length == _direction.Length)
+            {
+                for (int d = 0; d < _direction.Length; d++) score += _direction[d] * song.Embedding[d] * EMBEDDING_SCALE;
+            }
+
+            return score;
+        }
+
+        /// <param name="baseline">
+        /// Evidence above this counts as a like, below it as a dislike. It sits at half the profile's
+        /// average evidence, so a song played once and never revisited ranks below the songs the
+        /// profile keeps coming back to, the same judgment the hand-weighted model made.
+        /// </param>
+        public static PreferenceModel Train(IReadOnlyDictionary<string, SongFacts> library,
+            IReadOnlyDictionary<string, float> evidence, float baseline = 0f, ISet<string> heldOut = null)
+        {
+            var model = new PreferenceModel();
+            var rows = new List<(int[] Features, float[] Embedding, float Label, float Weight)>();
+            int dims = library.Values.FirstOrDefault(s => s.Embedding != null)?.Embedding.Length ?? 0;
+
+            int[] Encode(SongFacts song)
+            {
+                var indices = new List<int>(song.Features.Length);
+                foreach (var feature in song.Features)
+                {
+                    if (!model._index.TryGetValue(feature, out int i))
+                    {
+                        i = model._index.Count;
+                        model._index[feature] = i;
+                    }
+
+                    if (!indices.Contains(i)) indices.Add(i);
+                }
+
+                return indices.ToArray();
+            }
+
+            int positives = 0;
+            foreach (var (key, value) in evidence)
+            {
+                float relative = value - baseline;
+                if (relative == 0f || !library.TryGetValue(key, out var song)) continue;
+                bool positive = relative > 0f;
+                if (positive) positives++;
+                rows.Add((Encode(song), song.Embedding, positive ? 1f : 0f, Math.Min(Math.Abs(relative), MAX_EXAMPLE_WEIGHT)));
+            }
+
+            // Weak negatives: a stable pseudo-random slice of untouched songs, so the same history always
+            // trains the same model
+            int wanted = Math.Max(MIN_IMPLICIT_NEGATIVES, positives * IMPLICIT_NEGATIVES_PER_POSITIVE);
+            foreach (var song in library.Values
+                .Where(s => s.Canonical && !evidence.ContainsKey(s.Key) && (heldOut == null || !heldOut.Contains(s.Key)))
+                .OrderBy(s => StableHash(s.Key))
+                .Take(wanted))
+            {
+                rows.Add((Encode(song), song.Embedding, 0f, IMPLICIT_NEGATIVE_WEIGHT));
+            }
+
+            // Full-batch AdaGrad on weighted log loss plus L2. Sparse feature weights and the dense
+            // taste direction on the artist map are learned together.
+            int n = model._index.Count;
+            var weights = new float[n];
+            var history = new float[n];
+            var direction = new float[dims];
+            var directionHistory = new float[dims];
+            var directionGradient = new float[dims];
+            float bias = 0f, biasHistory = 0f;
+            var gradient = new float[n];
+            for (int iteration = 0; iteration < ITERATIONS; iteration++)
+            {
+                Array.Clear(gradient, 0, n);
+                Array.Clear(directionGradient, 0, dims);
+                float biasGradient = 0f;
+                foreach (var (features, embedding, label, weight) in rows)
+                {
+                    float z = bias;
+                    foreach (int i in features) z += weights[i];
+                    bool hasEmbedding = embedding != null && embedding.Length == dims;
+                    if (hasEmbedding)
+                    {
+                        for (int d = 0; d < dims; d++) z += direction[d] * embedding[d] * EMBEDDING_SCALE;
+                    }
+
+                    float p = 1f / (1f + (float) Math.Exp(-z));
+                    float error = weight * (p - label);
+                    biasGradient += error;
+                    foreach (int i in features) gradient[i] += error;
+                    if (hasEmbedding)
+                    {
+                        for (int d = 0; d < dims; d++) directionGradient[d] += error * embedding[d] * EMBEDDING_SCALE;
+                    }
+                }
+
+                for (int i = 0; i < n; i++)
+                {
+                    float g = gradient[i] + L2 * weights[i];
+                    history[i] += g * g;
+                    weights[i] -= LEARNING_RATE * g / ((float) Math.Sqrt(history[i]) + 1e-6f);
+                }
+
+                for (int d = 0; d < dims; d++)
+                {
+                    float g = directionGradient[d] + L2 * direction[d];
+                    directionHistory[d] += g * g;
+                    direction[d] -= LEARNING_RATE * g / ((float) Math.Sqrt(directionHistory[d]) + 1e-6f);
+                }
+
+                biasHistory += biasGradient * biasGradient;
+                bias -= LEARNING_RATE * biasGradient / ((float) Math.Sqrt(biasHistory) + 1e-6f);
+            }
+
+            model._weights = weights;
+            model._direction = direction;
+            model._bias = bias;
+            return model;
+        }
+
+        private static uint StableHash(string text)
+        {
+            // FNV-1a, stable across runs and platforms (string.GetHashCode is randomized per process)
+            uint hash = 2166136261;
+            foreach (char c in text)
+            {
+                hash ^= c;
+                hash *= 16777619;
+            }
+
+            return hash;
         }
     }
 
@@ -947,13 +1199,34 @@ namespace YARG.Recommendations
                 .Select(g => g.OrderBy(f => f.Date).Last())
                 .ToList();
 
-            // One model for everything, then each swipe is scored with its own song's evidence taken out
-            var taste = TasteModel.Build(library, plays, feedback, quits, favorites, now);
             var result = new List<(string, bool, float)>();
-            foreach (var swipe in latest)
+            if (!TasteModel.UseLearnedModel)
             {
-                float score = taste.ScoreExcluding(library[swipe.Key]);
-                result.Add((swipe.Key, swipe.Liked, swipe.Liked ? -score : score));
+                // One model for everything, then each swipe scored with its own song's evidence taken out
+                var taste = TasteModel.Build(library, plays, feedback, quits, favorites, now);
+                foreach (var swipe in latest)
+                {
+                    float score = taste.ScoreExcluding(library[swipe.Key]);
+                    result.Add((swipe.Key, swipe.Liked, swipe.Liked ? -score : score));
+                }
+
+                return result.OrderByDescending(r => r.Item3).ToList();
+            }
+
+            // Cross-validation: train without a fifth of the swipes, judge that fifth, repeat
+            const int FOLDS = 5;
+            for (int fold = 0; fold < FOLDS; fold++)
+            {
+                var held = latest.Where((_, i) => i % FOLDS == fold).ToList();
+                if (held.Count == 0) continue;
+                var heldKeys = new HashSet<string>(held.Select(h => h.Key));
+                var taste = TasteModel.Build(library, plays, feedback.Where(f => !heldKeys.Contains(f.Key)).ToList(),
+                    quits, favorites, now, heldKeys);
+                foreach (var swipe in held)
+                {
+                    float score = taste.Score(library[swipe.Key]);
+                    result.Add((swipe.Key, swipe.Liked, swipe.Liked ? -score : score));
+                }
             }
 
             return result.OrderByDescending(r => r.Item3).ToList();
