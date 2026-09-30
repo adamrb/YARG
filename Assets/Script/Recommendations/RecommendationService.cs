@@ -10,6 +10,7 @@ using YARG.Core.Logging;
 using YARG.Core.Song;
 using YARG.Core.Song.Recommendations;
 using YARG.Helpers;
+using YARG.Helpers.Extensions;
 using YARG.Player;
 using YARG.Playlists;
 using YARG.Scores;
@@ -131,6 +132,12 @@ namespace YARG.Recommendations
                     // The last few refreshes used up every candidate, so start over
                     _shownBeforeRefresh.Clear();
                     songs = Recommender.Recommend(snapshot.Library, history, _taste, _skill, random);
+                }
+
+                // Nothing to recommend (for example no chart at the profile's difficulty): keep the random picks
+                if (songs.Count == 0)
+                {
+                    return null;
                 }
 
                 _rows = songs
@@ -290,35 +297,13 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// The part a song is played with on an instrument, using the same lane conversions as the
-        /// difficulty select: 5-lane drums play on 4-lane and Pro Drums, and 4-lane charts play on 5-lane.
-        /// </summary>
-        internal static PartValues PlayablePart(SongEntry song, Instrument instrument)
-        {
-            var part = song[instrument];
-            if (part.IsActive())
-            {
-                return part;
-            }
-
-            return instrument switch
-            {
-                Instrument.FourLaneDrums or Instrument.ProDrums => song[Instrument.FiveLaneDrums],
-                Instrument.FiveLaneDrums                         => song[Instrument.ProDrums],
-                _                                                => part,
-            };
-        }
-
-        /// <summary>
-        /// The recommender's difficulty number for a song's part, or null if it cannot be played that way.
+        /// The recommender's difficulty number for a song's part, or null if Difficulty Select would not
+        /// offer the song on this instrument and difficulty.
         /// </summary>
         private static float? ChartDifficulty(SongEntry song, Instrument instrument, Difficulty difficulty, float songSpeed)
         {
-            var part = PlayablePart(song, instrument);
-
-            // Vocals do not track difficulties per part in song metadata
-            bool isVocals = instrument is Instrument.Vocals or Instrument.Harmony;
-            if (!part.IsActive() || (!isVocals && !part[difficulty]))
+            var part = song.PlayablePart(instrument);
+            if (!part.IsActive() || !song.HasPlayableDifficulty(instrument, difficulty))
             {
                 return null;
             }

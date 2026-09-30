@@ -1,7 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 using YARG.Core.Input;
+using YARG.Core.Logging;
 using YARG.Core.Song;
 using YARG.Localization;
 using YARG.Menu.Navigation;
@@ -57,26 +59,37 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
+            // Menu input waits while the model trains, so the library cannot move on underneath
             _swipeStarting = true;
             SwipeSession session;
-            try
+            using (Navigator.Instance.PushInputBlocker())
             {
-                session = await RecommendationService.StartSwipeSessionAsync();
-            }
-            finally
-            {
-                _swipeStarting = false;
+                try
+                {
+                    session = await RecommendationService.StartSwipeSessionAsync();
+                }
+                finally
+                {
+                    _swipeStarting = false;
+                }
             }
 
-            // The player may have moved on while the model was training
             if (this == null || !isActiveAndEnabled || MenuState != MenuState.Library)
             {
+                session?.Close();
                 return;
             }
 
             if (session == null)
             {
                 ToastManager.ToastWarning(Localize.Key(SWIPE_KEY, "NeedsProfile"));
+                return;
+            }
+
+            // A controller may have connected another profile while the model trained
+            if (session.Profile.Id != RecommendationService.GetPrimaryProfile()?.Id)
+            {
+                session.Close();
                 return;
             }
 
@@ -106,6 +119,8 @@ namespace YARG.Menu.MusicLibrary
             _swipeView.UndoClicked += UndoSwipe;
             _swipeView.ReviewClicked += ToggleSwipeReview;
             _swipeView.Show();
+            // The sidebar's difficulty rings sit on a canvas above the library and would show under the help bar
+            SetSidebarDifficultiesVisible(false);
             ShowSwipeStack();
         }
 
@@ -140,6 +155,7 @@ namespace YARG.Menu.MusicLibrary
         private void CloseSwipeView()
         {
             StopSwipePreview();
+            _swipeSession?.Close();
             _swipeSession = null;
             _swipeQueue.Clear();
             _swipeHistory.Clear();
@@ -150,6 +166,7 @@ namespace YARG.Menu.MusicLibrary
             _swipeView.UndoClicked -= UndoSwipe;
             _swipeView.ReviewClicked -= ToggleSwipeReview;
             _swipeView.Hide();
+            SetSidebarDifficultiesVisible(true);
         }
 
         // The library list stays behind the swipe screen unchanged
@@ -164,9 +181,10 @@ namespace YARG.Menu.MusicLibrary
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Like); }, hide: true),
                 new NavigationScheme.Entry(MenuAction.Up, $"{SWIPE_KEY}.Pass",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Pass); }, hide: true),
-                new NavigationScheme.Entry(MenuAction.Right, $"{SWIPE_KEY}.Like",
+                // The help bar shows left and right as one entry, so they share a label
+                new NavigationScheme.Entry(MenuAction.Right, $"{SWIPE_KEY}.PassLike",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Like); }, hide: true),
-                new NavigationScheme.Entry(MenuAction.Left, $"{SWIPE_KEY}.Pass",
+                new NavigationScheme.Entry(MenuAction.Left, $"{SWIPE_KEY}.PassLike",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Pass); }, hide: true),
                 new NavigationScheme.Entry(MenuAction.Green, $"{SWIPE_KEY}.PlayNow", PlaySwipeSong),
                 new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", LeaveSwipeMode),
@@ -230,11 +248,17 @@ namespace YARG.Menu.MusicLibrary
 
             if (!_swipeReviewing)
             {
+                // Answers are held until the ranking is done, so it matches what the player sees
                 List<(SongEntry Song, bool Liked)> rated;
                 _reviewLoading = true;
                 try
                 {
                     rated = await session.RatedSongsAsync();
+                }
+                catch (Exception e)
+                {
+                    YargLogger.LogException(e, "Failed to rank Song Swipe ratings.");
+                    return;
                 }
                 finally
                 {
@@ -281,13 +305,15 @@ namespace YARG.Menu.MusicLibrary
                 }
             }
 
+            // Undo works within one stack; switching stacks starts a new history
+            _swipeHistory.Clear();
             StopSwipePreview();
             ShowSwipeStack();
         }
 
         private void Swipe(SwipeDirection direction)
         {
-            if (_swipeSession == null || _swipeQueue.Count == 0)
+            if (_swipeSession == null || _swipeQueue.Count == 0 || _reviewLoading)
             {
                 return;
             }
@@ -330,7 +356,7 @@ namespace YARG.Menu.MusicLibrary
 
         private void UndoSwipe()
         {
-            if (_swipeSession == null)
+            if (_swipeSession == null || _reviewLoading)
             {
                 return;
             }

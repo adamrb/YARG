@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using SQLite;
-using YARG.Core;
 using YARG.Core.Logging;
 using YARG.Helpers;
 
@@ -42,9 +41,6 @@ namespace YARG.Recommendations
 
         [Indexed]
         public byte[] SongChecksum { get; set; }
-
-        public Instrument Instrument { get; set; }
-        public Difficulty Difficulty { get; set; }
 
         /// <summary>
         /// How far into the song the player got, from 0 to 1.
@@ -136,8 +132,7 @@ namespace YARG.Recommendations
             }
         }
 
-        public static void RecordQuit(Guid profileId, byte[] songChecksum, Instrument instrument,
-            Difficulty difficulty, float progress)
+        public static void RecordQuit(Guid profileId, byte[] songChecksum, float progress)
         {
             if (_db == null) return;
 
@@ -147,8 +142,6 @@ namespace YARG.Recommendations
                 {
                     ProfileId = profileId,
                     SongChecksum = songChecksum,
-                    Instrument = instrument,
-                    Difficulty = difficulty,
                     Progress = progress,
                     Date = DateTime.Now,
                 });

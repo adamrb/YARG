@@ -6,14 +6,15 @@ using YARG.Core.Game;
 using YARG.Core.Logging;
 using YARG.Core.Song;
 using YARG.Core.Song.Recommendations;
+using YARG.Helpers.Extensions;
 using YARG.Localization;
 
 namespace YARG.Recommendations
 {
     /// <summary>
     /// One Song Swipe session: keeps the library snapshot and the taste model, deals cards, and records
-    /// (and undoes) answers. Each answer retrains the model in the background; until that finishes, cards
-    /// come from the previous model.
+    /// (and undoes) answers. Answers retrain the model in the background; until that finishes, cards come
+    /// from the previous model.
     /// </summary>
     public sealed class SwipeSession
     {
@@ -29,7 +30,6 @@ namespace YARG.Recommendations
 
         private sealed class Answer
         {
-            public int RecordId;
             public FeedbackFact Fact;
             public string Favorite;
         }
@@ -37,10 +37,12 @@ namespace YARG.Recommendations
         private readonly RecommendationService.Snapshot _snapshot;
         private readonly HashSet<string> _dealt;
         private readonly SkillModel _skill;
+        // Answers given this session, by database record ID, so they can be undone
         private readonly Dictionary<int, Answer> _answers = new();
         private TasteModel _taste;
-        private int _nextToken;
-        private int _trainings;
+        private bool _training;
+        private bool _needsTraining;
+        private bool _closed;
 
         public YargProfile Profile => _snapshot.Profile;
         public int LikedCount { get; private set; }
@@ -75,8 +77,8 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// Records a like or pass, and optionally that the song was just added to favorites. Returns a
-        /// token for <see cref="UndoSwipe"/>, or -1 if the answer could not be saved (nothing changes then).
+        /// Records a like or pass, and optionally that the song was just added to favorites. Returns an ID
+        /// for <see cref="UndoSwipe"/>, or -1 if the answer could not be saved (nothing changes then).
         /// </summary>
         public int Swipe(SongEntry song, bool liked, bool addedFavorite = false)
         {
@@ -89,7 +91,6 @@ namespace YARG.Recommendations
             string key = song.Hash.ToString();
             var answer = new Answer
             {
-                RecordId = recordId,
                 Fact = new FeedbackFact { Key = key, Liked = liked, Date = DateTime.Now },
                 Favorite = addedFavorite ? key : null,
             };
@@ -99,29 +100,29 @@ namespace YARG.Recommendations
                 _snapshot.Favorites.Add(answer.Favorite);
             }
 
-            _answers[_nextToken] = answer;
+            _answers[recordId] = answer;
             Count(liked, 1);
             Retrain();
-            return _nextToken++;
+            return recordId;
         }
 
         /// <summary>
         /// Takes back an answer. Returns false if it could not be removed from the database (nothing
         /// changes then).
         /// </summary>
-        public bool UndoSwipe(int token)
+        public bool UndoSwipe(int recordId)
         {
-            if (!_answers.TryGetValue(token, out var answer))
+            if (!_answers.TryGetValue(recordId, out var answer))
             {
                 return true;
             }
 
-            if (!RecommendationStore.DeleteFeedback(answer.RecordId))
+            if (!RecommendationStore.DeleteFeedback(recordId))
             {
                 return false;
             }
 
-            _answers.Remove(token);
+            _answers.Remove(recordId);
             _snapshot.Feedback.Remove(answer.Fact);
             if (answer.Favorite != null)
             {
@@ -179,7 +180,7 @@ namespace YARG.Recommendations
                 return Localize.Key(KEY, "NotCharted");
             }
 
-            int intensity = RecommendationService.PlayablePart(song, _snapshot.Instrument).Intensity;
+            int intensity = song.PlayablePart(_snapshot.Instrument).Intensity;
             float predicted = _skill.PredictSong(facts);
             string band = predicted >= Recommender.AT_LEVEL ? "Comfortable"
                 : predicted >= Recommender.STRETCH ? "Stretch"
@@ -220,25 +221,44 @@ namespace YARG.Recommendations
         }
 
         /// <summary>
-        /// Trains a new model on the answers so far in the background. Only the newest training's result
-        /// is kept, so answers given in quick succession never leave an older model in place.
+        /// Stops any further training once the session is over.
+        /// </summary>
+        public void Close() => _closed = true;
+
+        /// <summary>
+        /// Trains a new model on the answers so far in the background. Answers given while a training
+        /// runs are picked up by one more training when it finishes, so fast input never queues up work.
         /// </summary>
         private async void Retrain()
         {
-            int training = ++_trainings;
-            var library = _snapshot.Library;
-            var history = _snapshot.CopyHistory();
+            _needsTraining = true;
+            if (_training)
+            {
+                return;
+            }
+
+            _training = true;
             try
             {
-                var taste = await Task.Run(() => TasteModel.Build(library, history));
-                if (training == _trainings)
+                var library = _snapshot.Library;
+                while (_needsTraining && !_closed)
                 {
-                    _taste = taste;
+                    _needsTraining = false;
+                    var history = _snapshot.CopyHistory();
+                    var taste = await Task.Run(() => TasteModel.Build(library, history));
+                    if (!_closed)
+                    {
+                        _taste = taste;
+                    }
                 }
             }
             catch (Exception e)
             {
                 YargLogger.LogException(e, "Failed to update the Song Swipe model.");
+            }
+            finally
+            {
+                _training = false;
             }
         }
     }

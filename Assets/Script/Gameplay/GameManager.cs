@@ -857,8 +857,7 @@ namespace YARG.Gameplay
                     continue;
                 }
 
-                RecommendationStore.RecordQuit(profile.Id, Song.Hash.HashBytes, profile.CurrentInstrument,
-                    profile.CurrentDifficulty, progress);
+                RecommendationStore.RecordQuit(profile.Id, Song.Hash.HashBytes, progress);
             }
         }
 

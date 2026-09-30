@@ -113,26 +113,19 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            _recommendationRows = null;
+            // Personal recommendations need a human profile; without one (or with nothing to recommend),
+            // keep the old random picks, which need a library bigger than the pick count
             _recommendationProfile = RecommendationService.GetPrimaryProfile()?.Id;
-            if (SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT)
+            _recommendationRows = RecommendationService.GetRows(refresh);
+            if (_recommendationRows != null)
             {
-                // Personal recommendations need a human profile; without one, keep the old random picks.
-                // An empty result is respected (for example when everything left was passed on).
-                var rows = RecommendationService.GetRows(refresh);
-                if (rows != null)
-                {
-                    _recommendationRows = rows;
-                    _recommendedSongs = rows.SelectMany(row => row.Songs).ToArray();
-                }
-                else
-                {
-                    _recommendedSongs = RecommendedSongs.GetRecommendedSongs();
-                }
+                _recommendedSongs = _recommendationRows.SelectMany(row => row.Songs).ToArray();
             }
             else
             {
-                _recommendedSongs = null;
+                _recommendedSongs = SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT
+                    ? RecommendedSongs.GetRecommendedSongs()
+                    : null;
             }
         }
 
