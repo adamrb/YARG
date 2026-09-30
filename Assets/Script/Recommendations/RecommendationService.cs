@@ -272,21 +272,23 @@ namespace YARG.Recommendations
 
                 // SearchStr has rich-text tags and diacritics removed, so markup never becomes a feature
                 int year = song.YearAsNumber != int.MaxValue ? song.YearAsNumber : 0;
-                var (position, popularity) = map.Place(song.Artist.SearchStr, song.Name.SearchStr);
-                library[key] = new SongFacts
+                var facts = new SongFacts
                 {
                     Key = key,
                     Features = SongNormalizer.Features(song.Artist.SearchStr, song.Genre.SearchStr,
                         song.Subgenre.SearchStr, song.Charter.SearchStr, song.Source.SearchStr, year,
-                        song.SongLengthSeconds).Concat(popularity).ToArray(),
+                        song.SongLengthSeconds),
                     ChartDifficulty = ChartDifficulty(song, instrument, difficulty, 1f),
                     Identity = SongNormalizer.Identity(song.Artist.SearchStr, song.Name.SearchStr),
-                    Position = position,
                 };
+                map.Place(facts, song.Artist.SearchStr, song.Name.SearchStr);
+                library[key] = facts;
                 entries[key] = song;
             }
 
             SongNormalizer.AssignCanonical(library.Values.Select(facts => (facts, entries[facts.Key].Name.SearchStr)));
+            // Songs by artists the map does not know get a position learned from this library's known songs
+            SongPlacer.PlaceUnknownSongs(library.Values);
             _librarySongs = songs;
             _libraryPart = (instrument, difficulty);
             _library = library;
