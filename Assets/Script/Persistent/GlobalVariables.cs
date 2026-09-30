@@ -79,7 +79,6 @@ namespace YARG
 
             // Initialize important classes
 
-            ExistingDataImporter.ImportIfNeeded();
             ReplayContainer.Init();
             ScoreContainer.Init();
             RecommendationStore.Init();

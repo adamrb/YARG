@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TMPro;
 using UnityEngine;
+using YARG.Audio.BASS;
 using YARG.Core;
 using YARG.Core.Audio;
 using YARG.Core.Game;
@@ -559,27 +560,27 @@ namespace YARG.Menu.MusicLibrary
                 if (SettingsManager.Settings.LibrarySort < SortAttribute.Instrument &&
                     SettingsManager.Settings.ShowRecommendedSongs.Value)
                 {
-                    if (_recommendedSongs != null && _recommendedSections != null)
+                    if (_recommendedSongs != null && _recommendationRows != null)
                     {
-                        foreach (var section in _recommendedSections)
+                        foreach (var row in _recommendationRows)
                         {
                             list.Add(new ButtonViewType(
-                                Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind.ToString()),
+                                Localize.Key("Menu.MusicLibrary.Recommendations", row.Kind.ToString()),
                                 "MusicLibraryIcons[Recommended]",
                                 RefreshRecommendations,
                                 RECOMMENDED_SONGS_ID,
-                                Localize.Key("Menu.MusicLibrary.Recommendations", section.Kind + "Help")
+                                Localize.Key("Menu.MusicLibrary.Recommendations", row.Kind + "Help")
                             ));
                             if (_recommendedHeaderIndex == -1)
                             {
                                 _recommendedHeaderIndex = list.Count - 1;
                             }
 
-                            foreach (var song in section.Songs)
+                            foreach (var song in row.Songs)
                             {
                                 list.Add(new SongViewType(this, song, "recommended"));
                             }
-                            _primaryHeaderIndex += section.Songs.Length + 1;
+                            _primaryHeaderIndex += row.Songs.Length + 1;
                         }
                     }
                     else if (_recommendedSongs != null)
@@ -913,7 +914,11 @@ namespace YARG.Menu.MusicLibrary
             }
         }
 
-        private async void StartPreview(double delay, CancellationTokenSource canceller)
+        /// <param name="leveled">
+        /// Level the clip's loudness toward a common target (Song Swipe), so quiet and loud previews
+        /// play at a similar volume.
+        /// </param>
+        private async void StartPreview(double delay, CancellationTokenSource canceller, bool leveled = false)
         {
             if (_currentSong == null)
             {
@@ -939,7 +944,8 @@ namespace YARG.Menu.MusicLibrary
                 delay,
                 FADE_DURATION,
                 SettingsManager.Settings.CensorMatureContent.Value,
-                canceller.Token);
+                canceller.Token,
+                leveled ? rms => LeveledPreviewVolume(previewVolume, rms) : null);
             if (context != null)
             {
                 if (_previewCanceller == canceller && !canceller.IsCancellationRequested)
@@ -951,6 +957,23 @@ namespace YARG.Menu.MusicLibrary
                     context.Dispose();
                 }
             }
+        }
+
+        // Mono RMS level that leveled previews aim for, and how far they may turn a song up or down
+        private const float PREVIEW_TARGET_RMS = 0.12f;
+        private const float PREVIEW_MIN_GAIN = 0.3f;
+        private const float PREVIEW_MAX_GAIN = 3f;
+
+        /// <summary>
+        /// The preview volume that brings a clip measured at <paramref name="rms"/> to the target level.
+        /// Volumes go through the audio engine's perceptual curve, so the gain is applied to the real
+        /// amplitude and mapped back.
+        /// </summary>
+        private static float LeveledPreviewVolume(float volume, float rms)
+        {
+            float gain = Mathf.Clamp(PREVIEW_TARGET_RMS / rms, PREVIEW_MIN_GAIN, PREVIEW_MAX_GAIN);
+            double amplitude = Math.Min(BassHelpers.ExponentialVolume(volume) * gain, 1.5);
+            return (float) BassHelpers.LogarithmicVolume(amplitude);
         }
 
         protected override void OnDisable()

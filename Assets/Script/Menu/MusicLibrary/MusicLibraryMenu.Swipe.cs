@@ -8,7 +8,6 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Playlists;
 using YARG.Recommendations;
-using YARG.Settings;
 
 namespace YARG.Menu.MusicLibrary
 {
@@ -32,15 +31,12 @@ namespace YARG.Menu.MusicLibrary
             public SwipeDirection Direction;
             public int FeedbackToken = -1;
             public bool AddedFavorite;
-            public bool AddedModelFavorite;
         }
 
-        private RecommendationService.SwipeSession _swipeSession;
+        private SwipeSession _swipeSession;
         private readonly List<SongEntry> _swipeQueue = new();
         private readonly Stack<SwipeAction> _swipeHistory = new();
         private SongSwipeView _swipeView;
-        private SwipePreview _swipePreview;
-        private CancellationTokenSource _swipePreviewCanceller;
 
         // Review mode walks back through songs already rated
         private bool _swipeReviewing;
@@ -126,7 +122,6 @@ namespace YARG.Menu.MusicLibrary
         private void CloseSwipeView()
         {
             StopSwipePreview();
-            ClearPreview();
             _swipeSession = null;
             _swipeQueue.Clear();
             _swipeHistory.Clear();
@@ -156,9 +151,9 @@ namespace YARG.Menu.MusicLibrary
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Like); }, hide: true),
                 new NavigationScheme.Entry(MenuAction.Up, $"{SWIPE_KEY}.Pass",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Pass); }, hide: true),
-                new NavigationScheme.Entry(MenuAction.Right, $"{SWIPE_KEY}.PassLike",
+                new NavigationScheme.Entry(MenuAction.Right, $"{SWIPE_KEY}.Like",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Like); }, hide: true),
-                new NavigationScheme.Entry(MenuAction.Left, $"{SWIPE_KEY}.PassLike",
+                new NavigationScheme.Entry(MenuAction.Left, $"{SWIPE_KEY}.Pass",
                     ctx => { if (!ctx.IsRepeat) Swipe(SwipeDirection.Pass); }, hide: true),
                 new NavigationScheme.Entry(MenuAction.Green, $"{SWIPE_KEY}.PlayNow", PlaySwipeSong),
                 new NavigationScheme.Entry(MenuAction.Red, "Menu.Common.Back", LeaveSwipeMode),
@@ -323,9 +318,9 @@ namespace YARG.Menu.MusicLibrary
                     if (!PlaylistContainer.FavoritesPlaylist.ContainsSong(song))
                     {
                         PlaylistContainer.FavoritesPlaylist.AddSong(song);
+                        _swipeSession.Favorite(song);
                         action.AddedFavorite = true;
                     }
-                    action.AddedModelFavorite = _swipeSession.Favorite(song);
                     action.FeedbackToken = _swipeSession.Swipe(song, true);
                     break;
             }
@@ -382,26 +377,16 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
+            // Cancel any end-of-queue step before landing the card still in flight
             _swipeEndPending = false;
             _swipeView.CompleteAnimation();
-            if (_swipeHistory.Count == 0)
-            {
-                return;
-            }
 
             var action = _swipeHistory.Pop();
             _swipeSession.UndoSwipe(action.FeedbackToken);
-            if (action.Direction == SwipeDirection.Favorite)
+            if (action.AddedFavorite)
             {
-                if (action.AddedFavorite)
-                {
-                    PlaylistContainer.FavoritesPlaylist.RemoveSong(action.Song);
-                }
-
-                if (action.AddedModelFavorite)
-                {
-                    _swipeSession.UndoFavorite(action.Song);
-                }
+                PlaylistContainer.FavoritesPlaylist.RemoveSong(action.Song);
+                _swipeSession.UndoFavorite(action.Song);
             }
 
             _swipeQueue.Insert(0, action.Song);
@@ -411,9 +396,9 @@ namespace YARG.Menu.MusicLibrary
         }
 
         /// <summary>
-        /// Swipe previews use their own player so their loudness can be leveled from card to card.
+        /// Plays the front card's preview through the library's preview player, with loudness leveling.
         /// </summary>
-        private async void PlaySwipePreview()
+        private void PlaySwipePreview()
         {
             StopSwipePreview();
             if (_swipeQueue.Count == 0)
@@ -421,38 +406,12 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            float volume = SettingsManager.Settings.PreviewVolume.Value;
-            if (volume <= 0)
-            {
-                return;
-            }
-
-            var canceller = new CancellationTokenSource();
-            _swipePreviewCanceller = canceller;
-            var preview = await SwipePreview.Create(_swipeQueue[0], volume, SWIPE_PREVIEW_DELAY,
-                SettingsManager.Settings.CensorMatureContent.Value, canceller.Token);
-            if (preview == null)
-            {
-                return;
-            }
-
-            // A newer card may have started its own preview while this one was loading
-            if (_swipePreviewCanceller != canceller || canceller.IsCancellationRequested)
-            {
-                preview.Dispose();
-                return;
-            }
-
-            _swipePreview = preview;
+            _currentSong = _swipeQueue[0];
+            _previewCanceller = new CancellationTokenSource();
+            StartPreview(SWIPE_PREVIEW_DELAY, _previewCanceller, leveled: true);
         }
 
-        private void StopSwipePreview()
-        {
-            _swipePreviewCanceller?.Cancel();
-            _swipePreviewCanceller = null;
-            _swipePreview?.Dispose();
-            _swipePreview = null;
-        }
+        private void StopSwipePreview() => StopPreview(clearCurrentSong: true);
 
         private void PlaySwipeSong()
         {

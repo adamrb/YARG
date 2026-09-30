@@ -22,7 +22,7 @@ namespace YARG.Menu.MusicLibrary
     {
 #nullable enable
         private static SongEntry[]? _recommendedSongs;
-        private static List<RecommendationService.Section>? _recommendedSections;
+        private static List<RecommendationService.Row>? _recommendationRows;
 #nullable disable
 
         private static string _currentSearch = string.Empty;
@@ -112,16 +112,16 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            _recommendedSections = null;
+            _recommendationRows = null;
             if (SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT)
             {
                 // Personal recommendations need a human profile; without one, keep the old random picks.
                 // An empty result is respected (for example when everything left was passed on).
-                var sections = RecommendationService.GetSections(refresh);
-                if (sections != null)
+                var rows = RecommendationService.GetRows(refresh);
+                if (rows != null)
                 {
-                    _recommendedSections = sections;
-                    _recommendedSongs = sections.SelectMany(section => section.Songs).ToArray();
+                    _recommendationRows = rows;
+                    _recommendedSongs = rows.SelectMany(row => row.Songs).ToArray();
                 }
                 else
                 {
