@@ -382,6 +382,7 @@
                 "NothingToUndo": "Nothing to undo",
                 "Summary": "Song Swipe: {0} liked, {1} passed. Recommendations updated.",
                 "NeedsProfile": "Song Swipe needs a player profile",
+                "Loading": "Getting Song Swipe ready...",
                 "NothingLeft": "No more songs to swipe right now"
             },
             "PlayableSongs": "PLAYABLE SONGS",

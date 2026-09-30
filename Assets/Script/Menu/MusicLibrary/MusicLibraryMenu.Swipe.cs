@@ -43,9 +43,12 @@ namespace YARG.Menu.MusicLibrary
         private readonly List<SongEntry> _swipeQueue = new();
         private readonly Stack<SwipeAction> _swipeHistory = new();
 
-        // Review mode walks back through songs already rated
+        // Review mode walks back through songs already rated. Ranking runs in the background; answers wait
+        // until it is done. The session is recorded so a ranking left behind by a closed session never
+        // blocks a new one.
         private bool _swipeReviewing;
-        private bool _reviewLoading;
+        private SwipeSession _reviewLoadingFor;
+        private bool ReviewLoading => _reviewLoadingFor != null && _reviewLoadingFor == _swipeSession;
         private readonly Dictionary<SongEntry, bool> _reviewAnswers = new();
         private int _reviewTotal;
 
@@ -59,19 +62,19 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            // Menu input waits while the model trains, so the library cannot move on underneath
+            // The loading screen blocks menu and pointer input until swipe mode is set up, so the library
+            // cannot move on while the model trains
+            using var loading = new LoadingContext();
+            loading.SetLoadingText(Localize.Key(SWIPE_KEY, "Loading"));
             _swipeStarting = true;
             SwipeSession session;
-            using (Navigator.Instance.PushInputBlocker())
+            try
             {
-                try
-                {
-                    session = await RecommendationService.StartSwipeSessionAsync();
-                }
-                finally
-                {
-                    _swipeStarting = false;
-                }
+                session = await RecommendationService.StartSwipeSessionAsync();
+            }
+            finally
+            {
+                _swipeStarting = false;
             }
 
             if (this == null || !isActiveAndEnabled || MenuState != MenuState.Library)
@@ -169,9 +172,6 @@ namespace YARG.Menu.MusicLibrary
             SetSidebarDifficultiesVisible(true);
         }
 
-        // The library list stays behind the swipe screen unchanged
-        private List<ViewType> CreateSwipeViewList() => CreateNormalViewList();
-
         private void SetSwipeNavigationScheme()
         {
             _ = Navigator.Instance.PushScheme(new NavigationScheme(new()
@@ -241,7 +241,7 @@ namespace YARG.Menu.MusicLibrary
         private async void ToggleSwipeReview()
         {
             var session = _swipeSession;
-            if (session == null || _reviewLoading)
+            if (session == null || ReviewLoading)
             {
                 return;
             }
@@ -250,7 +250,7 @@ namespace YARG.Menu.MusicLibrary
             {
                 // Answers are held until the ranking is done, so it matches what the player sees
                 List<(SongEntry Song, bool Liked)> rated;
-                _reviewLoading = true;
+                _reviewLoadingFor = session;
                 try
                 {
                     rated = await session.RatedSongsAsync();
@@ -262,7 +262,10 @@ namespace YARG.Menu.MusicLibrary
                 }
                 finally
                 {
-                    _reviewLoading = false;
+                    if (_reviewLoadingFor == session)
+                    {
+                        _reviewLoadingFor = null;
+                    }
                 }
 
                 // Swipe mode may have closed while the ratings were ranked
@@ -313,7 +316,7 @@ namespace YARG.Menu.MusicLibrary
 
         private void Swipe(SwipeDirection direction)
         {
-            if (_swipeSession == null || _swipeQueue.Count == 0 || _reviewLoading)
+            if (_swipeSession == null || _swipeQueue.Count == 0 || ReviewLoading)
             {
                 return;
             }
@@ -356,7 +359,7 @@ namespace YARG.Menu.MusicLibrary
 
         private void UndoSwipe()
         {
-            if (_swipeSession == null || _reviewLoading)
+            if (_swipeSession == null || ReviewLoading)
             {
                 return;
             }

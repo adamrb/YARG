@@ -22,10 +22,14 @@ from a handful of plays and ratings.
     zstd -dc recordings_all_time.jsonl.zst \\
         | uv run --with numpy --with scipy --with implicit build_song_map.py --source <dump name> -
 """
-import argparse, gzip, json, math, sys, unicodedata
+import argparse, gzip, json, math, os, sys, unicodedata
+
+# ALS brings its own threading; BLAS threads on top slow it down and make results vary between runs
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 from array import array
 from collections import defaultdict
 
+PLACEHOLDERS = {"unknown name", "unknown artist", "unknown album", "unknown charter", "unknown source"}
 ALTERNATE_VERSION = {"demo", "prototype", "beta", "live", "remix", "rehearsal", "alt", "alternate", "cover", "karaoke"}
 VERSION_NOTE = ALTERNATE_VERSION | {
     "version", "remaster", "remastered", "mix", "edit", "radio", "single", "album", "feat", "ft", "featuring", "take",
@@ -68,17 +72,25 @@ def is_version_note(text):
     return any(w in VERSION_NOTE or (len(w) == 4 and w.isdigit()) for w in collapse(text).split())
 
 
+def known(text):
+    collapsed = collapse(text)
+    return "" if collapsed in PLACEHOLDERS else collapsed
+
+
 def artist_key(name):
     outside, _ = bracket_groups(search_str(name))
-    words = [w for w in collapse(outside).split() if w != "and"]
+    words = [w for w in known(outside).split() if w != "and"]
     if len(words) > 1 and words[0] == "the": words = words[1:]
     return " ".join(words)
 
 
 def title_key(name):
     text = search_str(name)
+    # Version notes after dashes: "Song - Live - 2011 Remaster"
     dash = text.rfind(" - ")
-    if dash > 0 and is_version_note(text[dash + 3:]): text = text[:dash]
+    while dash > 0 and is_version_note(text[dash + 3:]):
+        text = text[:dash]
+        dash = text.rfind(" - ")
     parts = []
     depth, group = 0, []
     for c in text:
@@ -93,8 +105,11 @@ def title_key(name):
             parts.append(c)
         else:
             group.append(c)
-    return collapse("".join(parts))
+    return known("".join(parts))
 
+
+# Bump when song keys change, so a cached matrix from older keys is not reused
+CACHE_VERSION = "2"
 
 _song_keys = {}
 
@@ -128,8 +143,14 @@ def main():
     import numpy as np
     from scipy.sparse import csr_matrix, diags
 
-    if a.matrix_cache and __import__("os").path.exists(a.matrix_cache):
+    # The parsed matrix can be cached for experiments; it is only reused for the same dump and settings
+    cache_info = np.array([a.source, str(a.min_listens), CACHE_VERSION])
+    if a.matrix_cache and os.path.exists(a.matrix_cache):
+        if a.eval_out:
+            sys.exit("--eval-out needs the dump itself; it cannot be written from --matrix-cache")
         cache = np.load(a.matrix_cache, allow_pickle=True)
+        if "info" not in cache or list(cache["info"]) != list(cache_info):
+            sys.exit(f"{a.matrix_cache} was built from other inputs; delete it or pick another --matrix-cache")
         rows, cols, vals = cache["rows"], cache["cols"], cache["vals"]
         keys = list(cache["keys"])
         users = int(cache["users"])
@@ -141,13 +162,14 @@ def main():
         eval_file = open(a.eval_out, "w") if a.eval_out else None
         for line in (sys.stdin if a.input == "-" else open(a.input, encoding="utf-8")):
             record = json.loads(line)
+            # Versions of a song ("Song", "Song - 2011 Remaster") are merged before the listen minimum
             counts = defaultdict(int)
             for track in record["data"]:
-                if track.get("listen_count", 0) < a.min_listens or not track.get("track_name") or not track.get("artist_name"):
-                    continue
-                key = song_key(track["artist_name"], track["track_name"])
-                if key:
-                    counts[key] += track["listen_count"]
+                if track.get("track_name") and track.get("artist_name"):
+                    key = song_key(track["artist_name"], track["track_name"])
+                    if key:
+                        counts[key] += track.get("listen_count", 0)
+            counts = {key: count for key, count in counts.items() if count >= a.min_listens}
             if not counts:
                 continue
             if record["user_id"] % 10 == 0:
@@ -162,7 +184,8 @@ def main():
         if eval_file: eval_file.close()
         rows, cols, vals = np.frombuffer(rows, np.int32), np.frombuffer(cols, np.int32), np.frombuffer(vals, np.float32)
         if a.matrix_cache:
-            np.savez(a.matrix_cache, rows=rows, cols=cols, vals=vals, keys=np.array(keys, dtype=object), users=users)
+            np.savez(a.matrix_cache, rows=rows, cols=cols, vals=vals, keys=np.array(keys, dtype=object), users=users,
+                     info=cache_info)
         print(f"{users} training users, {len(keys)} tracks, {len(vals)} user-track pairs", flush=True)
 
     X = csr_matrix((vals, (rows, cols)), shape=(users, len(keys)))
@@ -194,14 +217,21 @@ def main():
     for i, key in enumerate(track_keys):
         by_artist[key.split("|", 1)[0]].append(i)
 
+    # People who listen to any of an artist's songs, each counted once
+    artists = sorted(by_artist)
+    artist_index = {artist: n for n, artist in enumerate(artists)}
+    track_artist = csr_matrix((np.ones(len(track_keys), np.float32),
+                               (np.arange(len(track_keys)), [artist_index[k.split("|", 1)[0]] for k in track_keys])),
+                              shape=(len(track_keys), len(artists)))
+    artist_listeners = np.asarray(((X > 0).astype(np.float32) @ track_artist > 0).sum(axis=0)).ravel()
+
     written_tracks = 0
     with gzip.open(a.out, "wt", encoding="utf-8", compresslevel=9) as f:
         f.write(f"# YARG song map: songs people listen to together sit close together. Built from {a.source} "
                 f"(ListenBrainz, CC0) by Tools/SongMap/build_song_map.py ({a.method}, {a.dims} dimensions).\n")
-        for artist in sorted(by_artist):
+        for artist in artists:
             tracks = sorted(by_artist[artist], key=lambda i: -track_listeners[i])
-            total = int(track_listeners[tracks].sum())
-            if total >= a.artist_min_listeners:
+            if artist_listeners[artist_index[artist]] >= a.artist_min_listeners:
                 position = (E[tracks] * track_listeners[tracks, None]).sum(axis=0)
                 position /= max(np.linalg.norm(position), 1e-9)
                 f.write("a\t" + artist + "\t" + "\t".join(f"{x:.2f}" for x in position) + "\n")

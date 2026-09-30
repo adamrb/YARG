@@ -108,8 +108,10 @@ namespace YARG.Recommendations
             {
                 var snapshot = TakeSnapshot(profile);
                 var history = snapshot.History;
-                int stamp = HashCode.Combine(profile.Id, _library, history.Plays.Count, history.Feedback.Count,
-                    history.Quits.Count, history.Favorites.Aggregate(0, (hash, key) => hash ^ key.GetHashCode()));
+                // The date is part of it because recent plays and older evidence age day by day
+                int stamp = HashCode.Combine(profile.Id, _library, DateTime.Today, history.Plays.Count,
+                    history.Feedback.Count, history.Quits.Count,
+                    history.Favorites.Aggregate(0, (hash, key) => hash ^ key.GetHashCode()));
                 if (stamp != _rowsStamp || _taste == null)
                 {
                     _rowsStamp = stamp;
@@ -132,12 +134,6 @@ namespace YARG.Recommendations
                     // The last few refreshes used up every candidate, so start over
                     _shownBeforeRefresh.Clear();
                     songs = Recommender.Recommend(snapshot.Library, history, _taste, _skill, random);
-                }
-
-                // Nothing to recommend (for example no chart at the profile's difficulty): keep the random picks
-                if (songs.Count == 0)
-                {
-                    return null;
                 }
 
                 _rows = songs

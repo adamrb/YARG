@@ -498,7 +498,8 @@ namespace YARG.Menu.MusicLibrary
                 MenuState.PlaylistSelect => CreatePlaylistSelectViewList(),
                 MenuState.Playlist       => CreatePlaylistViewList(),
                 MenuState.Show           => CreateShowViewList(),
-                MenuState.Swipe          => CreateSwipeViewList(),
+                // The library list stays behind the swipe screen unchanged
+                MenuState.Swipe          => CreateNormalViewList(),
                 _                        => throw new Exception("Unreachable.")
             };
 

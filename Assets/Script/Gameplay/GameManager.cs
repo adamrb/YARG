@@ -848,11 +848,18 @@ namespace YARG.Gameplay
                 return;
             }
 
+            // Only sessions whose finished plays would be saved (normal speed, no bots unless allowed) count,
+            // so a quit can always be outweighed by finishing the song later the same way
+            if (!ScoreContainer.IsBandScoreValid(SongSpeed, ActivePlayers.Select(player => player.Player)))
+            {
+                return;
+            }
+
             // Players who dropped out earlier left at a different point, so only the ones still playing count
             foreach (var player in ActivePlayers)
             {
                 var profile = player.Player.Profile;
-                if (profile.IsBot || player.Player.IsReplay)
+                if (!ScoreContainer.IsSoloScoreValid(SongSpeed, player.Player) || player.Player.IsReplay)
                 {
                     continue;
                 }
