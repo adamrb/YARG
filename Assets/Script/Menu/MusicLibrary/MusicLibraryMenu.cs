@@ -1250,6 +1250,9 @@ namespace YARG.Menu.MusicLibrary
             public readonly bool PreserveIndexOnDynamicSort; // Sorted by Playcount or Stars
             public readonly ScoreContext ScoreContext;
 
+            // The recommendation row the selected song was in, if any
+            public readonly string RecommendationRowStableId;
+
             public SelectionSnapshot(
                 int selectedIndex,
                 string selectedStableId,
@@ -1258,7 +1261,8 @@ namespace YARG.Menu.MusicLibrary
                 string headerFirstSongContentStableId,
                 string headerPreviousSongContentStableId,
                 bool preserveIndexOnDynamicSort,
-                ScoreContext scoreContext)
+                ScoreContext scoreContext,
+                string recommendationRowStableId)
             {
                 SelectedIndex = selectedIndex;
                 SelectedStableId = selectedStableId;
@@ -1268,6 +1272,7 @@ namespace YARG.Menu.MusicLibrary
                 HeaderPreviousSongContentStableId = headerPreviousSongContentStableId;
                 PreserveIndexOnDynamicSort = preserveIndexOnDynamicSort;
                 ScoreContext = scoreContext;
+                RecommendationRowStableId = recommendationRowStableId;
             }
         }
 
@@ -1334,7 +1339,48 @@ namespace YARG.Menu.MusicLibrary
                 headerFirstSongContentStableId,
                 headerPreviousSongContentStableId,
                 preserveIndexOnDynamicSort,
-                ScoreContext.Capture());
+                ScoreContext.Capture(),
+                RecommendationRowOf(selectedIndex));
+        }
+
+        /// <summary>
+        /// The stable ID of the recommendation row header above a song in the recommendation rows, or null.
+        /// </summary>
+        private string RecommendationRowOf(int index)
+        {
+            if (MenuState != MenuState.Library || PlaylistMode || index >= _primaryHeaderIndex ||
+                index < 0 || index >= ViewList.Count || ViewList[index] is not SongViewType)
+            {
+                return null;
+            }
+
+            for (int i = index - 1; i >= 0; i--)
+            {
+                if (ViewList[i] is ButtonViewType { ID: RECOMMENDED_SONGS_ID } header)
+                {
+                    return header.StableId;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Selects the first song of a recommendation row (or its header if the row has no songs).
+        /// </summary>
+        private bool SetIndexToTopOfRecommendationRow(string rowStableId)
+        {
+            var list = ViewList;
+            for (int i = 0; i < _primaryHeaderIndex && i < list.Count; i++)
+            {
+                if (list[i].StableId == rowStableId)
+                {
+                    SelectedIndex = i + 1 < list.Count && list[i + 1] is SongViewType ? i + 1 : i;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void RestoreSelectionSnapshot(SelectionSnapshot snapshot)
@@ -1358,6 +1404,13 @@ namespace YARG.Menu.MusicLibrary
 
             if (!selectionWasHeader && SetIndexToStableId(snapshot.SelectedStableId))
                 // recommended song (or button) was selected and still exists
+                return;
+
+            if (snapshot.RecommendationRowStableId != null && _recommendedHeaderIndex != -1 &&
+                (SetIndexToTopOfRecommendationRow(snapshot.RecommendationRowStableId) || SetIndexToFirstRecommendedSong()))
+                // a recommended song was picked and has left its row (a song just played leaves the rows), so
+                // go to the top of the same row rather than to the song further down the library. Only while
+                // the rows are shown; when a sort hides them, the song is found where it now is below.
                 return;
 
             if (SetIndexToSongContentStableId(snapshot.SelectedSongContentStableId, _primaryHeaderIndex))
