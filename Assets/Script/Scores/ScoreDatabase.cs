@@ -58,6 +58,22 @@ namespace YARG.Scores
     }
 
     /// <summary>
+    /// One play from a profile's history, as returned by <see cref="ScoreDatabase.QueryPlayerHistory"/>.
+    /// </summary>
+    /// <remarks>
+    /// Note that this is not an actual database record type, it is only used as the result of queries.
+    /// </remarks>
+    public class PlayerHistoryRecord
+    {
+        public byte[]     SongChecksum { get; set; }
+        public DateTime   Date         { get; set; }
+        public float      SongSpeed    { get; set; }
+        public Instrument Instrument   { get; set; }
+        public Difficulty Difficulty   { get; set; }
+        public float?     Percent      { get; set; }
+    }
+
+    /// <summary>
     /// The score database.
     /// </summary>
     /// <remarks>
@@ -581,6 +597,29 @@ namespace YARG.Scores
             return _db.Query<PlayCountRecord>(
                 query,
                 profile.Id
+            );
+        }
+
+        /// <summary>
+        /// Every non-replay play by a profile, oldest first. Used to build the profile's recommendation model.
+        /// </summary>
+        public List<PlayerHistoryRecord> QueryPlayerHistory(Guid playerId)
+        {
+            return _db.Query<PlayerHistoryRecord>(
+                @"SELECT GameRecords.SongChecksum AS SongChecksum,
+                    GameRecords.Date AS Date,
+                    GameRecords.SongSpeed AS SongSpeed,
+                    PlayerScores.Instrument AS Instrument,
+                    PlayerScores.Difficulty AS Difficulty,
+                    PlayerScores.Percent AS Percent
+                FROM PlayerScores
+                INNER JOIN GameRecords
+                    ON PlayerScores.GameRecordId = GameRecords.Id
+                WHERE PlayerScores.PlayerId = ?
+                    AND PlayerScores.IsReplay = 0
+                    AND GameRecords.PlayedWithReplay = 0
+                ORDER BY GameRecords.Date",
+                playerId
             );
         }
 

@@ -336,6 +336,55 @@
                 "Plural": "RECOMMENDED SONGS"
             },
             "RecommendedSongsHelp": "Refresh List of Recommended Songs",
+            "Recommendations": {
+                "ForYou": "FOR YOU",
+                "ForYouHelp": "Songs Like the Ones You Keep Coming Back To. Select to Refresh",
+                "AtYourLevel": "AT YOUR LEVEL",
+                "AtYourLevelHelp": "Songs You Should Play Well Right Now. Select to Refresh",
+                "NextStepUp": "NEXT STEP UP",
+                "NextStepUpHelp": "A Little Harder, Easiest First. Select to Refresh",
+                "Challenge": "CHALLENGE",
+                "Refreshed": "New recommendations",
+                "ChallengeHelp": "Songs That Will Push You. Select to Refresh"
+            },
+            "SongSwipe": {
+                "Header": "SONG SWIPE",
+                "HeaderHelp": "Strum Down to Like, Up to Pass",
+                "Counts": "{0} LIKED   {1} PASSED",
+                "ReasonArtist": "More from {0}",
+                "ReasonFansOf": "Fans of {0} play this",
+                "ReasonGenre": "You play a lot of {0}",
+                "ReasonNewGenre": "New genre for you: {0}",
+                "ReasonDifferent": "Something different",
+                "NotCharted": "No chart for your instrument",
+                "DifficultyLine": "Difficulty {0}/6, {1}",
+                "Comfortable": "should feel comfortable",
+                "Stretch": "a bit of a stretch",
+                "Challenge": "a real challenge",
+                "Like": "Like",
+                "Pass": "Pass",
+                "PassLike": "Pass / Like",
+                "PlayNow": "Play Now",
+                "Favorite": "Favorite",
+                "Skip": "Skip",
+                "Undo": "Undo",
+                "Review": "Review Ratings",
+                "BackToNew": "New Songs",
+                "ReviewHeader": "REVIEW RATINGS",
+                "ReviewHelp": "Likely mistakes first",
+                "ReviewCounts": "{0} OF {1}",
+                "YouLiked": "You liked this",
+                "YouPassed": "You passed on this",
+                "NothingToReview": "No ratings to review yet",
+                "AllDone": "That's all for now. Undo, review your ratings, or go back to the library.",
+                "SaveFailed": "Couldn't save that rating",
+                "UndoFailed": "Couldn't undo that rating",
+                "NothingToUndo": "Nothing to undo",
+                "Summary": "Song Swipe: {0} liked, {1} passed. Recommendations updated.",
+                "NeedsProfile": "Song Swipe needs a player profile",
+                "Loading": "Getting Song Swipe ready...",
+                "NothingLeft": "No more songs to swipe right now"
+            },
             "PlayableSongs": "PLAYABLE SONGS",
             "RandomSong": "RANDOM SONG",
             "Sort": {
@@ -377,6 +426,8 @@
                 },
                 "Item": {
                     "RandomSong": "Random Song",
+                    "SongSwipe": "Song Swipe",
+                    "RefreshRecommendations": "Refresh Recommendations",
                     "BackToTop": "Back to Top",
                     "ScanSongs": "Scan Songs",
                     "SortBy": "Sort By...",
@@ -1597,6 +1648,10 @@
             "ShowAdvancedMusicLibraryOptions": {
                 "Name": "Show Advanced Music Library Options",
                 "Description": "Adds advanced settings to the \"More Options\" menu in the Music Library such as \"View Song Folder\" and \"Copy Song Checksum\"."
+            },
+            "PersonalizedRecommendations": {
+                "Name": "Personalized Recommendations",
+                "Description": "Recommend songs in the Music Library from what the first player's profile plays, favorites and rates in Song Swipe. When off, recommendations are random."
             },
             "ShowCursorTimer": {
                 "Name": "Cursor Show Time",

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TMPro;
 using UnityEngine;
+using YARG.Audio.BASS;
 using YARG.Core;
 using YARG.Core.Audio;
 using YARG.Core.Game;
@@ -17,6 +18,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Player;
 using YARG.Playlists;
+using YARG.Recommendations;
 using YARG.Scores;
 using YARG.Settings;
 using YARG.Song;
@@ -89,7 +91,8 @@ namespace YARG.Menu.MusicLibrary
         Library,
         PlaylistSelect,
         Playlist,
-        Show
+        Show,
+        Swipe
     }
 
     public partial class MusicLibraryMenu : ListMenu<ViewType, SongView>
@@ -99,6 +102,7 @@ namespace YARG.Menu.MusicLibrary
         private const int BACK_ID = 2;
         private const int RECOMMENDED_SONGS_ID = 3;
         private const int CREATE_NEW_PLAYLIST_ID = 4;
+        private const int SONG_SWIPE_ID = 5;
         private const int MINIMUM_ALBUM_GROUP_SIZE = 3;
 
         public static MusicLibraryMode LibraryMode;
@@ -143,7 +147,7 @@ namespace YARG.Menu.MusicLibrary
         private PopupMenu _popupMenu;
 
         protected override int ExtraListViewPadding => 15;
-        protected override bool CanScroll => !_popupMenu.gameObject.activeSelf;
+        protected override bool CanScroll => !_popupMenu.gameObject.activeSelf && MenuState != MenuState.Swipe;
 
         public bool ShouldDisplaySoloHighScores { get; private set; }
 
@@ -207,6 +211,13 @@ namespace YARG.Menu.MusicLibrary
             // Hack to ensure that crowd samples are stopped no matter what
             GlobalAudioHandler.StopAllSfxChannels();
 
+            // Song Swipe does not survive leaving the library (for example to play a song)
+            if (MenuState == MenuState.Swipe)
+            {
+                MenuState = MenuState.Library;
+                CloseSwipeView();
+            }
+
             // Set navigation scheme
             SetNavigationScheme();
 
@@ -230,6 +241,10 @@ namespace YARG.Menu.MusicLibrary
             }
             else if (_reloadState == MusicLibraryReloadState.Partial)
             {
+                // A partial reload follows a finished song or a profile change, both of which change
+                // what the recommender knows, so rebuild the recommendations before the list
+                SetRecommendedSongs();
+
                 // Note that the order matters here: SelectedPlaylist must be set before calling UpdateSearch,
                 // but SelectedIndex must be set _after_ calling UpdateSearch
                 SelectedPlaylist = _savedPlaylist;
@@ -331,8 +346,8 @@ namespace YARG.Menu.MusicLibrary
         // Public because PopupMenu may need to reset the navigation scheme
         public void SetNavigationScheme(bool reset = false)
         {
-            // Show mode sets its own navigation, don't overwrite
-            if (MenuState == MenuState.Show)
+            // Show and swipe modes set their own navigation, don't overwrite
+            if (MenuState is MenuState.Show or MenuState.Swipe)
             {
                 return;
             }
@@ -483,6 +498,8 @@ namespace YARG.Menu.MusicLibrary
                 MenuState.PlaylistSelect => CreatePlaylistSelectViewList(),
                 MenuState.Playlist       => CreatePlaylistViewList(),
                 MenuState.Show           => CreateShowViewList(),
+                // The library list stays behind the swipe screen unchanged
+                MenuState.Swipe          => CreateNormalViewList(),
                 _                        => throw new Exception("Unreachable.")
             };
 
@@ -546,7 +563,30 @@ namespace YARG.Menu.MusicLibrary
                 if (SettingsManager.Settings.LibrarySort < SortAttribute.Instrument &&
                     SettingsManager.Settings.ShowRecommendedSongs.Value)
                 {
-                    if (_recommendedSongs != null)
+                    if (_recommendedSongs != null && _recommendationRows != null)
+                    {
+                        foreach (var row in _recommendationRows)
+                        {
+                            list.Add(new ButtonViewType(
+                                Localize.Key("Menu.MusicLibrary.Recommendations", row.Kind.ToString()),
+                                "MusicLibraryIcons[Recommended]",
+                                RefreshRecommendations,
+                                RECOMMENDED_SONGS_ID,
+                                Localize.Key("Menu.MusicLibrary.Recommendations", row.Kind + "Help")
+                            ));
+                            if (_recommendedHeaderIndex == -1)
+                            {
+                                _recommendedHeaderIndex = list.Count - 1;
+                            }
+
+                            foreach (var song in row.Songs)
+                            {
+                                list.Add(new SongViewType(this, song, "recommended"));
+                            }
+                            _primaryHeaderIndex += row.Songs.Length + 1;
+                        }
+                    }
+                    else if (_recommendedSongs != null)
                     {
                         string key = Localize.Key("Menu.MusicLibrary.RecommendedSongs",
                             _recommendedSongs.Length == 1 ? "Singular" : "Plural");
@@ -569,6 +609,18 @@ namespace YARG.Menu.MusicLibrary
                             list.Add(new SongViewType(this, song, "recommended"));
                         }
                         _primaryHeaderIndex += _recommendedSongs.Length + 1;
+                    }
+
+                    // Song Swipe feeds the personal recommendations, so it is offered with them
+                    if (_recommendationRows != null)
+                    {
+                        list.Add(new ButtonViewType(
+                            Localize.Key("Menu.MusicLibrary.SongSwipe.Header"),
+                            "MusicLibraryIcons[Recommended]",
+                            EnterSwipeMode,
+                            SONG_SWIPE_ID,
+                            Localize.Key("Menu.MusicLibrary.SongSwipe.HeaderHelp")));
+                        _primaryHeaderIndex += 1;
                     }
                 }
             }
@@ -877,7 +929,11 @@ namespace YARG.Menu.MusicLibrary
             }
         }
 
-        private async void StartPreview(double delay, CancellationTokenSource canceller)
+        /// <param name="leveled">
+        /// Level the clip's loudness toward a common target (Song Swipe), so quiet and loud previews
+        /// play at a similar volume.
+        /// </param>
+        private async void StartPreview(double delay, CancellationTokenSource canceller, bool leveled = false)
         {
             if (_currentSong == null)
             {
@@ -903,7 +959,8 @@ namespace YARG.Menu.MusicLibrary
                 delay,
                 FADE_DURATION,
                 SettingsManager.Settings.CensorMatureContent.Value,
-                canceller.Token);
+                canceller.Token,
+                leveled ? rms => LeveledPreviewVolume(previewVolume, rms) : null);
             if (context != null)
             {
                 if (_previewCanceller == canceller && !canceller.IsCancellationRequested)
@@ -915,6 +972,23 @@ namespace YARG.Menu.MusicLibrary
                     context.Dispose();
                 }
             }
+        }
+
+        // Mono RMS level that leveled previews aim for, and how far they may turn a song up or down
+        private const float PREVIEW_TARGET_RMS = 0.12f;
+        private const float PREVIEW_MIN_GAIN = 0.3f;
+        private const float PREVIEW_MAX_GAIN = 3f;
+
+        /// <summary>
+        /// The preview volume that brings a clip measured at <paramref name="rms"/> to the target level.
+        /// Volumes go through the audio engine's perceptual curve, so the gain is applied to the real
+        /// amplitude and mapped back.
+        /// </summary>
+        private static float LeveledPreviewVolume(float volume, float rms)
+        {
+            float gain = Mathf.Clamp(PREVIEW_TARGET_RMS / rms, PREVIEW_MIN_GAIN, PREVIEW_MAX_GAIN);
+            double amplitude = Math.Min(BassHelpers.ExponentialVolume(volume) * gain, 1.5);
+            return (float) BassHelpers.LogarithmicVolume(amplitude);
         }
 
         protected override void OnDisable()
@@ -984,6 +1058,9 @@ namespace YARG.Menu.MusicLibrary
                     break;
                 case MenuState.Show:
                     LeaveShowMode();
+                    break;
+                case MenuState.Swipe:
+                    LeaveSwipeMode();
                     break;
                 case MenuState.Library:
                     ExitLibrary();
@@ -1186,6 +1263,9 @@ namespace YARG.Menu.MusicLibrary
             public readonly bool PreserveIndexOnDynamicSort; // Sorted by Playcount or Stars
             public readonly ScoreContext ScoreContext;
 
+            // The recommendation row the selected song was in, if any
+            public readonly string RecommendationRowStableId;
+
             public SelectionSnapshot(
                 int selectedIndex,
                 string selectedStableId,
@@ -1194,7 +1274,8 @@ namespace YARG.Menu.MusicLibrary
                 string headerFirstSongContentStableId,
                 string headerPreviousSongContentStableId,
                 bool preserveIndexOnDynamicSort,
-                ScoreContext scoreContext)
+                ScoreContext scoreContext,
+                string recommendationRowStableId)
             {
                 SelectedIndex = selectedIndex;
                 SelectedStableId = selectedStableId;
@@ -1204,6 +1285,7 @@ namespace YARG.Menu.MusicLibrary
                 HeaderPreviousSongContentStableId = headerPreviousSongContentStableId;
                 PreserveIndexOnDynamicSort = preserveIndexOnDynamicSort;
                 ScoreContext = scoreContext;
+                RecommendationRowStableId = recommendationRowStableId;
             }
         }
 
@@ -1270,7 +1352,48 @@ namespace YARG.Menu.MusicLibrary
                 headerFirstSongContentStableId,
                 headerPreviousSongContentStableId,
                 preserveIndexOnDynamicSort,
-                ScoreContext.Capture());
+                ScoreContext.Capture(),
+                RecommendationRowOf(selectedIndex));
+        }
+
+        /// <summary>
+        /// The stable ID of the recommendation row header above a song in the recommendation rows, or null.
+        /// </summary>
+        private string RecommendationRowOf(int index)
+        {
+            if (MenuState != MenuState.Library || PlaylistMode || index >= _primaryHeaderIndex ||
+                index < 0 || index >= ViewList.Count || ViewList[index] is not SongViewType)
+            {
+                return null;
+            }
+
+            for (int i = index - 1; i >= 0; i--)
+            {
+                if (ViewList[i] is ButtonViewType { ID: RECOMMENDED_SONGS_ID } header)
+                {
+                    return header.StableId;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Selects the first song of a recommendation row (or its header if the row has no songs).
+        /// </summary>
+        private bool SetIndexToTopOfRecommendationRow(string rowStableId)
+        {
+            var list = ViewList;
+            for (int i = 0; i < _primaryHeaderIndex && i < list.Count; i++)
+            {
+                if (list[i].StableId == rowStableId)
+                {
+                    SelectedIndex = i + 1 < list.Count && list[i + 1] is SongViewType ? i + 1 : i;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void RestoreSelectionSnapshot(SelectionSnapshot snapshot)
@@ -1294,6 +1417,13 @@ namespace YARG.Menu.MusicLibrary
 
             if (!selectionWasHeader && SetIndexToStableId(snapshot.SelectedStableId))
                 // recommended song (or button) was selected and still exists
+                return;
+
+            if (snapshot.RecommendationRowStableId != null && _recommendedHeaderIndex != -1 &&
+                (SetIndexToTopOfRecommendationRow(snapshot.RecommendationRowStableId) || SetIndexToFirstRecommendedSong()))
+                // a recommended song was picked and has left its row (a song just played leaves the rows), so
+                // go to the top of the same row rather than to the song further down the library. Only while
+                // the rows are shown; when a sort hides them, the song is found where it now is below.
                 return;
 
             if (SetIndexToSongContentStableId(snapshot.SelectedSongContentStableId, _primaryHeaderIndex))
@@ -1383,6 +1513,22 @@ namespace YARG.Menu.MusicLibrary
             return false;
         }
 
+        /// <summary>
+        /// Rerolls every recommendation row, skipping the songs just shown, and keeps the cursor on the rows.
+        /// </summary>
+        public void RefreshRecommendations()
+        {
+            SetRecommendedSongs(refresh: true);
+            _searchField.Reset();
+            UpdateSearch(true);
+            if (!SetIndexToFirstRecommendedSong())
+            {
+                SelectedIndex = 0;
+            }
+
+            ToastManager.ToastInformation(Localize.Key("Menu.MusicLibrary.Recommendations.Refreshed"));
+        }
+
         public void RefreshSidebar()
         {
             _sidebar.RefreshFavoriteState();
@@ -1425,12 +1571,26 @@ namespace YARG.Menu.MusicLibrary
         {
             _noPlayerWarning.SetActive(PlayerContainer.Players.Count <= 0);
             _needsReload = true;
+            RefreshIfRecommendationProfileChanged();
         }
 
         private void OnPlayerRemoved(YargPlayer player)
         {
             _noPlayerWarning.SetActive(PlayerContainer.Players.Count <= 0);
             _needsReload = true;
+            RefreshIfRecommendationProfileChanged();
+        }
+
+        /// <summary>
+        /// The recommendations belong to the first human profile, so rebuild them as soon as it changes.
+        /// </summary>
+        private void RefreshIfRecommendationProfileChanged()
+        {
+            if (RecommendationService.GetPrimaryProfile()?.Id != _recommendationProfile &&
+                MenuState == MenuState.Library && isActiveAndEnabled)
+            {
+                RefreshAndReselect();
+            }
         }
 
         public static void ResetMainLibraryIndex()

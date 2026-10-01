@@ -1154,7 +1154,7 @@ namespace YARG.Menu.DifficultySelect
                 bool invalidDifficulty = false;
                 foreach (var showsong in _songList)
                 {
-                    if (!HasPlayableDifficulty(showsong, profile.CurrentInstrument, difficulty))
+                    if (!showsong.HasPlayableDifficulty(profile.CurrentInstrument, difficulty))
                     {
                         invalidDifficulty = true;
                         break;
@@ -1307,32 +1307,6 @@ namespace YARG.Menu.DifficultySelect
                 Instrument.ProDrums      => entry.HasInstrument(Instrument.FiveLaneDrums),
                 // Allow 4 -> 5-lane conversions to be played on 5-lane
                 Instrument.FiveLaneDrums => entry.HasInstrument(Instrument.ProDrums),
-                _ => false
-            };
-        }
-
-        private bool HasPlayableDifficulty(SongEntry entry, in Instrument instrument, in Difficulty difficulty)
-        {
-            // For vocals, insert special difficulties
-            if (instrument is Instrument.Vocals or Instrument.Harmony)
-            {
-                return difficulty is not Difficulty.ExpertPlus;
-            }
-
-            // For PK, disallow beginner
-            if (instrument is Instrument.ProKeys && difficulty is Difficulty.Beginner)
-            {
-                return false;
-            }
-
-            // Otherwise, we can do this
-            return entry[instrument][difficulty] || instrument switch
-            {
-                // Allow 5 -> 4-lane conversions to be played on 4-lane
-                Instrument.FourLaneDrums or
-                Instrument.ProDrums      => entry[Instrument.FiveLaneDrums][difficulty],
-                // Allow 4 -> 5-lane conversions to be played on 5-lane
-                Instrument.FiveLaneDrums => entry[Instrument.ProDrums][difficulty],
                 _ => false
             };
         }

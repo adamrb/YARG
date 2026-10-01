@@ -14,6 +14,7 @@ using YARG.Localization;
 using YARG.Menu.Navigation;
 using YARG.Player;
 using YARG.Playlists;
+using YARG.Recommendations;
 using YARG.Replays;
 using YARG.Scores;
 using YARG.Settings;
@@ -80,6 +81,8 @@ namespace YARG
 
             ReplayContainer.Init();
             ScoreContainer.Init();
+            RecommendationStore.Init();
+            RecommendationService.PreloadSongMap();
             PlaylistContainer.Initialize();
             CustomContentManager.Initialize();
             LocalizationManager.Initialize(CommandLineArgs.Language);
@@ -145,6 +148,7 @@ namespace YARG
 
             ReplayContainer.Destroy();
             ScoreContainer.Destroy();
+            RecommendationStore.Destroy();
             InputManager.Destroy();
             PlayerContainer.Destroy();
             GlobalAudioHandler.Close();

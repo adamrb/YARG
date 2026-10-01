@@ -311,6 +311,7 @@ namespace YARG.Settings
                 };
 
             public ToggleSetting ShowRecommendedSongs { get; } = new(true, ShowRecommendedSongsCallback);
+            public ToggleSetting PersonalizedRecommendations { get; } = new(true, ShowRecommendedSongsCallback);
             public ToggleSetting OnlyShowPlayableSongs { get; } = new(false, RefreshLibraryFilterCallback);
 
             public DropdownSetting<SongLengthLabelMode> SongLengthLabels { get; }

@@ -24,6 +24,7 @@ using YARG.Menu.Navigation;
 using YARG.Menu.Persistent;
 using YARG.Menu.ScoreScreen;
 using YARG.Playback;
+using YARG.Recommendations;
 using YARG.Player;
 using YARG.Replays;
 using YARG.Scores;
@@ -823,8 +824,48 @@ namespace YARG.Gameplay
 
         public void ForceQuitSong()
         {
+            RecordQuitForRecommendations();
+
             GlobalVariables.State = PersistentState.Default;
             GlobalVariables.Instance.LoadScene(SceneIndex.Menu);
+        }
+
+        /// <summary>
+        /// Leaving a song early is a signal the recommender can use, but the score database only records
+        /// finished songs, so quits are stored separately.
+        /// </summary>
+        private void RecordQuitForRecommendations()
+        {
+            if (Song == null || _players == null || IsPractice || SongLength <= 0 ||
+                GlobalVariables.State.PlayingWithReplay)
+            {
+                return;
+            }
+
+            float progress = Mathf.Clamp01((float) (SongTime / SongLength));
+            if (progress >= 0.97f)
+            {
+                return;
+            }
+
+            // Only sessions whose finished plays would be saved (normal speed, no bots unless allowed) count,
+            // so a quit can always be outweighed by finishing the song later the same way
+            if (!ScoreContainer.IsBandScoreValid(SongSpeed, ActivePlayers.Select(player => player.Player)))
+            {
+                return;
+            }
+
+            // Players who dropped out earlier left at a different point, so only the ones still playing count
+            foreach (var player in ActivePlayers)
+            {
+                var profile = player.Player.Profile;
+                if (!ScoreContainer.IsSoloScoreValid(SongSpeed, player.Player) || player.Player.IsReplay)
+                {
+                    continue;
+                }
+
+                RecommendationStore.RecordQuit(profile.Id, Song.Hash.HashBytes, progress);
+            }
         }
 
         public void SetVenueCameraManager(CameraManager cameraManager)

@@ -12,6 +12,7 @@ using YARG.Localization;
 using YARG.Menu.Data;
 using YARG.Menu.Persistent;
 using YARG.Playlists;
+using YARG.Recommendations;
 using YARG.Settings;
 using YARG.Song;
 
@@ -21,6 +22,8 @@ namespace YARG.Menu.MusicLibrary
     {
 #nullable enable
         private static SongEntry[]? _recommendedSongs;
+        private static List<RecommendationService.Row>? _recommendationRows;
+        private static Guid? _recommendationProfile;
 #nullable disable
 
         private static string _currentSearch = string.Empty;
@@ -107,7 +110,7 @@ namespace YARG.Menu.MusicLibrary
             }
         }
 
-        private void SetRecommendedSongs()
+        private void SetRecommendedSongs(bool refresh = false)
         {
             if (!SettingsManager.Settings.ShowRecommendedSongs.Value)
             {
@@ -115,13 +118,20 @@ namespace YARG.Menu.MusicLibrary
                 return;
             }
 
-            if (SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT)
+            // Personal recommendations need a human profile; without one keep the old random picks, which need
+            // a library bigger than the pick count. An empty personal result stays empty (for example when
+            // everything left was passed on), since the random picks know nothing about passes.
+            _recommendationProfile = RecommendationService.GetPrimaryProfile()?.Id;
+            _recommendationRows = RecommendationService.GetRows(refresh);
+            if (_recommendationRows != null)
             {
-                _recommendedSongs = RecommendedSongs.GetRecommendedSongs();
+                _recommendedSongs = _recommendationRows.SelectMany(row => row.Songs).ToArray();
             }
             else
             {
-                _recommendedSongs = null;
+                _recommendedSongs = SongContainer.Count > RecommendedSongs.RECOMMEND_SONGS_COUNT
+                    ? RecommendedSongs.GetRecommendedSongs()
+                    : null;
             }
         }
 
