@@ -287,8 +287,6 @@ namespace YARG.Recommendations
             }
 
             SongNormalizer.AssignCanonical(library.Values.Select(facts => (facts, entries[facts.Key].Name.SearchStr)));
-            // Songs by artists the map does not know get a position learned from this library's known songs
-            SongPlacer.PlaceUnknownSongs(library.Values);
             _librarySongs = songs;
             _libraryPart = (instrument, difficulty);
             _library = library;
